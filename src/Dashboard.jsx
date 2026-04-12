@@ -1,0 +1,864 @@
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+
+// ─── Simulated 129 Watershed Unit Data ───
+// Generate realistic data following dissertation patterns
+const CITIES = [
+  { name: "北京", abbr: "BJ", color: "#E63946", units: 12, cx: 8, cy: 3 },
+  { name: "天津", abbr: "TJ", color: "#457B9D", units: 8, cx: 10, cy: 6 },
+  { name: "石家庄", abbr: "SJZ", color: "#2A9D8F", units: 11, cx: 6, cy: 10 },
+  { name: "唐山", abbr: "TS", color: "#E9C46A", units: 10, cx: 12, cy: 4 },
+  { name: "保定", abbr: "BD", color: "#F4A261", units: 14, cx: 7, cy: 7 },
+  { name: "廊坊", abbr: "LF", color: "#264653", units: 6, cx: 9, cy: 5 },
+  { name: "沧州", abbr: "CZ", color: "#E76F51", units: 12, cx: 11, cy: 9 },
+  { name: "衡水", abbr: "HS", color: "#606C38", units: 8, cx: 9, cy: 11 },
+  { name: "邢台", abbr: "XT", color: "#BC6C25", units: 10, cx: 6, cy: 13 },
+  { name: "邯郸", abbr: "HD", color: "#DDA15E", units: 9, cx: 5, cy: 15 },
+  { name: "张家口", abbr: "ZJK", color: "#588157", units: 12, cx: 4, cy: 2 },
+  { name: "承德", abbr: "CD", color: "#3A5A40", units: 10, cx: 9, cy: 1 },
+  { name: "秦皇岛", abbr: "QHD", color: "#A8DADC", units: 7, cx: 14, cy: 2 },
+];
+
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
+}
+
+function generateWatershedData() {
+  const units = [];
+  let id = 0;
+  const rng = seededRandom(42);
+  
+  CITIES.forEach((city, ci) => {
+    for (let i = 0; i < city.units; i++) {
+      const angle = (i / city.units) * Math.PI * 2 + rng() * 0.5;
+      const radius = 0.8 + rng() * 1.2;
+      
+      // Ch4: Resilience baseline - 4 subsystems
+      const isUrban = ci < 3;
+      const isMountain = ci >= 10;
+      const econR = isUrban ? 0.5 + rng() * 0.4 : isMountain ? 0.1 + rng() * 0.3 : 0.2 + rng() * 0.4;
+      const socR = isUrban ? 0.5 + rng() * 0.35 : 0.15 + rng() * 0.4;
+      const infraR = isUrban ? 0.55 + rng() * 0.4 : isMountain ? 0.05 + rng() * 0.25 : 0.15 + rng() * 0.35;
+      const ecoR = isMountain ? 0.5 + rng() * 0.4 : isUrban ? 0.1 + rng() * 0.3 : 0.25 + rng() * 0.4;
+      const nfr = (econR + socR + infraR + ecoR) / 4;
+      
+      // Ch5: Risk - HESA
+      const hazard = isMountain ? 0.1 + rng() * 0.3 : isUrban ? 0.3 + rng() * 0.4 : 0.2 + rng() * 0.6;
+      const exposure = isUrban ? 0.5 + rng() * 0.4 : 0.05 + rng() * 0.35;
+      const sensitivity = 0.2 + rng() * 0.6;
+      const adaptability = infraR * 0.8 + rng() * 0.15;
+      const riskScore = (hazard * 0.3 + exposure * 0.25 + sensitivity * 0.25 + (1 - adaptability) * 0.2);
+      
+      // Quadrant: H=high risk, L=low risk; H(2nd)=high vulnerability(low resilience)
+      const highRisk = riskScore > 0.45;
+      const lowResilience = nfr < 0.35;
+      const quadrant = highRisk ? (lowResilience ? "HH" : "HL") : (lowResilience ? "LH" : "LL");
+      
+      // Ch6: DRL recovery
+      const aeld = riskScore * exposure * (0.5 + rng() * 0.5) * 100; // billion CNY analog
+      const hubWeight = (isUrban ? 0.6 : 0.2) + rng() * 0.3;
+      const damage = hazard * (1 - nfr * 0.45) * (0.6 + rng() * 0.4);
+      
+      units.push({
+        id: id++,
+        cityIdx: ci,
+        cityName: city.name,
+        cityAbbr: city.abbr,
+        x: city.cx + Math.cos(angle) * radius,
+        y: city.cy + Math.sin(angle) * radius,
+        // Ch4
+        econR, socR, infraR, ecoR, nfr,
+        weakest: [econR, socR, infraR, ecoR].indexOf(Math.min(econR, socR, infraR, ecoR)),
+        // Ch5
+        hazard, exposure, sensitivity, adaptability, riskScore, quadrant,
+        // Ch6
+        aeld, hubWeight, damage,
+        repaired: false,
+      });
+    }
+  });
+  
+  // Sort by AELD desc for DRL repair order (simplified)
+  const sortedByAELD = [...units].sort((a, b) => b.aeld - a.aeld);
+  sortedByAELD.forEach((u, i) => { u.repairOrder = i; });
+  
+  // Assign repair phase
+  units.forEach(u => {
+    if (u.repairOrder < 45) u.repairPhase = "紧急";
+    else if (u.repairOrder < 84) u.repairPhase = "系统";
+    else u.repairPhase = "收尾";
+  });
+  
+  return units;
+}
+
+const WATERSHED_DATA = generateWatershedData();
+
+// ─── Color Scales ───
+function lerp(a, b, t) { return a + (b - a) * Math.max(0, Math.min(1, t)); }
+
+function valueToColor(val, scheme = "viridis") {
+  const v = Math.max(0, Math.min(1, val));
+  if (scheme === "resilience") {
+    const r = Math.round(lerp(220, 30, v));
+    const g = Math.round(lerp(50, 170, v));
+    const b = Math.round(lerp(50, 100, v));
+    return `rgb(${r},${g},${b})`;
+  }
+  if (scheme === "risk") {
+    const r = Math.round(lerp(40, 220, v));
+    const g = Math.round(lerp(120, 60, v));
+    const b = Math.round(lerp(180, 40, v));
+    return `rgb(${r},${g},${b})`;
+  }
+  if (scheme === "recovery") {
+    const r = Math.round(lerp(80, 20, v));
+    const g = Math.round(lerp(80, 200, v));
+    const b = Math.round(lerp(120, 100, v));
+    return `rgb(${r},${g},${b})`;
+  }
+  return `rgb(${Math.round(v*255)},${Math.round(v*200)},${Math.round((1-v)*255)})`;
+}
+
+const QUADRANT_COLORS = {
+  HH: "#DC2626", // 高风险低韧性 - 双重困境
+  HL: "#F59E0B", // 高风险高韧性 - 韧性缓冲
+  LH: "#8B5CF6", // 低风险低韧性 - 潜在脆弱
+  LL: "#10B981", // 低风险高韧性 - 安全储备
+};
+
+const QUADRANT_LABELS = {
+  HH: "双重困境",
+  HL: "韧性缓冲",
+  LH: "潜在脆弱",
+  LL: "安全储备",
+};
+
+const PHASE_COLORS = {
+  "紧急": "#EF4444",
+  "系统": "#F59E0B",
+  "收尾": "#6B7280",
+};
+
+const SUBSYSTEM_NAMES = ["经济韧性", "社会韧性", "基础设施韧性", "生态韧性"];
+const SUBSYSTEM_KEYS = ["econR", "socR", "infraR", "ecoR"];
+const SUBSYSTEM_COLORS = ["#E63946", "#457B9D", "#2A9D8F", "#E9C46A"];
+
+// ─── Main Component ───
+export default function Dashboard() {
+  const [chapter, setChapter] = useState(4);
+  const [selectedUnit, setSelectedUnit] = useState(null);
+  const [ch4Layer, setCh4Layer] = useState("nfr"); // nfr, econR, socR, infraR, ecoR, weakest
+  const [ch5Layer, setCh5Layer] = useState("riskScore"); // riskScore, hazard, exposure, sensitivity, adaptability, quadrant
+  const [ch6Layer, setCh6Layer] = useState("recovery"); // recovery, aeld, damage, phase
+  const [recoveryStep, setRecoveryStep] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [hoveredUnit, setHoveredUnit] = useState(null);
+  const timerRef = useRef(null);
+
+  // Recovery animation
+  useEffect(() => {
+    if (isPlaying) {
+      timerRef.current = setInterval(() => {
+        setRecoveryStep(prev => {
+          if (prev >= 43) { setIsPlaying(false); return 43; }
+          return prev + 1;
+        });
+      }, 600);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [isPlaying]);
+
+  // Compute recovery state
+  const recoveryState = useMemo(() => {
+    const repaired = new Set();
+    const steps = [];
+    const sorted = [...WATERSHED_DATA].sort((a, b) => a.repairOrder - b.repairOrder);
+    
+    for (let s = 0; s < 43; s++) {
+      const batch = sorted.slice(s * 3, s * 3 + 3);
+      batch.forEach(u => repaired.add(u.id));
+      steps.push(new Set(repaired));
+    }
+    
+    const currentRepaired = recoveryStep > 0 ? steps[Math.min(recoveryStep - 1, 42)] : new Set();
+    const currentBatch = recoveryStep > 0 && recoveryStep <= 43
+      ? sorted.slice((recoveryStep - 1) * 3, (recoveryStep - 1) * 3 + 3).map(u => u.id)
+      : [];
+    
+    // Calculate F(t) curve
+    const totalWeight = WATERSHED_DATA.reduce((s, u) => s + u.aeld, 0);
+    const curve = [0.491]; // initial
+    let cumRepaired = new Set();
+    for (let s = 0; s < 43; s++) {
+      const batch = sorted.slice(s * 3, s * 3 + 3);
+      batch.forEach(u => cumRepaired.add(u.id));
+      let F = 0.491;
+      cumRepaired.forEach(uid => {
+        const u = WATERSHED_DATA[uid];
+        F += (u.damage * u.aeld / totalWeight) * 0.82;
+      });
+      curve.push(Math.min(F, 0.846));
+    }
+    
+    return { currentRepaired, currentBatch, curve };
+  }, [recoveryStep]);
+
+  const getUnitColor = useCallback((unit) => {
+    if (chapter === 4) {
+      if (ch4Layer === "weakest") return SUBSYSTEM_COLORS[unit.weakest];
+      const key = ch4Layer === "nfr" ? "nfr" : ch4Layer;
+      return valueToColor(unit[key], "resilience");
+    }
+    if (chapter === 5) {
+      if (ch5Layer === "quadrant") return QUADRANT_COLORS[unit.quadrant];
+      const key = ch5Layer;
+      return valueToColor(unit[key], "risk");
+    }
+    if (chapter === 6) {
+      if (ch6Layer === "phase") return PHASE_COLORS[unit.repairPhase];
+      if (ch6Layer === "recovery") {
+        if (recoveryState.currentBatch.includes(unit.id)) return "#FBBF24";
+        if (recoveryState.currentRepaired.has(unit.id)) return "#10B981";
+        return valueToColor(unit.damage, "risk");
+      }
+      if (ch6Layer === "aeld") return valueToColor(unit.aeld / 50, "risk");
+      if (ch6Layer === "damage") return valueToColor(unit.damage, "risk");
+    }
+    return "#666";
+  }, [chapter, ch4Layer, ch5Layer, ch6Layer, recoveryState]);
+
+  const displayUnit = hoveredUnit !== null ? WATERSHED_DATA[hoveredUnit] : selectedUnit !== null ? WATERSHED_DATA[selectedUnit] : null;
+
+  // Map bounds
+  const mapPadding = 1.5;
+  const allX = WATERSHED_DATA.map(u => u.x);
+  const allY = WATERSHED_DATA.map(u => u.y);
+  const minX = Math.min(...allX) - mapPadding;
+  const maxX = Math.max(...allX) + mapPadding;
+  const minY = Math.min(...allY) - mapPadding;
+  const maxY = Math.max(...allY) + mapPadding;
+
+  return (
+    <div style={{
+      width: "100%", minHeight: "100vh",
+      background: "linear-gradient(135deg, #0a0e17 0%, #111827 50%, #0f172a 100%)",
+      color: "#e2e8f0", fontFamily: "'Noto Sans SC', 'SF Pro Display', sans-serif",
+      display: "flex", flexDirection: "column", overflow: "hidden",
+    }}>
+      {/* Google Font */}
+      <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+      {/* ─── Header ─── */}
+      <header style={{
+        padding: "12px 20px",
+        background: "rgba(15,23,42,0.9)",
+        borderBottom: "1px solid rgba(100,116,139,0.2)",
+        display: "flex", alignItems: "center", gap: 16,
+        backdropFilter: "blur(12px)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 8, height: 8, borderRadius: "50%",
+            background: "#10B981", boxShadow: "0 0 8px #10B981",
+          }} />
+          <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: 1 }}>
+            京津冀城市群洪涝韧性全过程仪表盘
+          </span>
+        </div>
+        
+        <div style={{ display: "flex", gap: 2, marginLeft: "auto" }}>
+          {[
+            { ch: 4, label: "灾前韧性基线", icon: "◆" },
+            { ch: 5, label: "灾中风险耦合", icon: "▲" },
+            { ch: 6, label: "灾后恢复优化", icon: "●" },
+          ].map(({ ch, label, icon }) => (
+            <button key={ch} onClick={() => { setChapter(ch); setRecoveryStep(0); setIsPlaying(false); }}
+              style={{
+                padding: "6px 14px", border: "none", cursor: "pointer",
+                borderRadius: 4, fontSize: 12, fontWeight: 500,
+                fontFamily: "inherit",
+                background: chapter === ch ? "rgba(59,130,246,0.25)" : "transparent",
+                color: chapter === ch ? "#60A5FA" : "#94A3B8",
+                border: chapter === ch ? "1px solid rgba(59,130,246,0.4)" : "1px solid transparent",
+                transition: "all 0.2s",
+              }}>
+              <span style={{ marginRight: 4 }}>{icon}</span>
+              第{ch}章 {label}
+            </button>
+          ))}
+        </div>
+
+        {/* DPSIR chain */}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 12 }}>
+          {["D 驱动力", "P 压力", "S 状态", "I 影响", "R 响应"].map((label, i) => (
+            <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{
+                fontSize: 9, padding: "2px 5px", borderRadius: 3,
+                background: (chapter === 4 && i === 2) || (chapter === 5 && (i === 1 || i === 3)) || (chapter === 6 && i === 4)
+                  ? "rgba(59,130,246,0.3)" : "rgba(51,65,85,0.5)",
+                color: (chapter === 4 && i === 2) || (chapter === 5 && (i === 1 || i === 3)) || (chapter === 6 && i === 4)
+                  ? "#93C5FD" : "#64748B",
+                fontWeight: 500,
+              }}>{label}</span>
+              {i < 4 && <span style={{ color: "#334155", fontSize: 8 }}>→</span>}
+            </span>
+          ))}
+        </div>
+      </header>
+
+      {/* ─── Main Content ─── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        
+        {/* ─── Left: Layer Controls ─── */}
+        <div style={{
+          width: 180, padding: "14px 12px",
+          background: "rgba(15,23,42,0.6)",
+          borderRight: "1px solid rgba(100,116,139,0.15)",
+          display: "flex", flexDirection: "column", gap: 10, overflowY: "auto",
+        }}>
+          <div style={{ fontSize: 10, color: "#64748B", fontWeight: 600, letterSpacing: 1, textTransform: "uppercase" }}>
+            图层控制
+          </div>
+
+          {chapter === 4 && <>
+            <LayerGroup label="韧性维度" options={[
+              { key: "nfr", label: "综合NFR" },
+              { key: "econR", label: "经济韧性" },
+              { key: "socR", label: "社会韧性" },
+              { key: "infraR", label: "基础设施韧性" },
+              { key: "ecoR", label: "生态韧性" },
+              { key: "weakest", label: "最弱子系统" },
+            ]} value={ch4Layer} onChange={setCh4Layer} />
+            
+            {ch4Layer !== "weakest" && <ColorBar scheme="resilience" label={["低", "高"]} />}
+            {ch4Layer === "weakest" && (
+              <div style={{ fontSize: 10, display: "flex", flexDirection: "column", gap: 3, marginTop: 4 }}>
+                {SUBSYSTEM_NAMES.map((n, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: 2, background: SUBSYSTEM_COLORS[i] }} />
+                    <span style={{ color: "#94A3B8" }}>{n}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>}
+
+          {chapter === 5 && <>
+            <LayerGroup label="风险维度" options={[
+              { key: "riskScore", label: "综合风险" },
+              { key: "hazard", label: "H 危险性" },
+              { key: "exposure", label: "E 暴露性" },
+              { key: "sensitivity", label: "S 敏感性" },
+              { key: "adaptability", label: "A 适应性" },
+              { key: "quadrant", label: "四象限耦合" },
+            ]} value={ch5Layer} onChange={setCh5Layer} />
+            
+            {ch5Layer !== "quadrant" && <ColorBar scheme="risk" label={["低", "高"]} />}
+            {ch5Layer === "quadrant" && (
+              <div style={{ fontSize: 10, display: "flex", flexDirection: "column", gap: 3, marginTop: 4 }}>
+                {Object.entries(QUADRANT_LABELS).map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: 2, background: QUADRANT_COLORS[k] }} />
+                    <span style={{ color: "#94A3B8" }}>{k} {v}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>}
+
+          {chapter === 6 && <>
+            <LayerGroup label="恢复维度" options={[
+              { key: "recovery", label: "修复动画" },
+              { key: "aeld", label: "年期望经济损失" },
+              { key: "damage", label: "初始损伤" },
+              { key: "phase", label: "修复阶段" },
+            ]} value={ch6Layer} onChange={setCh6Layer} />
+            
+            {ch6Layer === "recovery" && (
+              <div style={{ fontSize: 10, display: "flex", flexDirection: "column", gap: 3, marginTop: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#FBBF24", boxShadow: "0 0 6px #FBBF24" }} />
+                  <span style={{ color: "#94A3B8" }}>当前修复</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#10B981" }} />
+                  <span style={{ color: "#94A3B8" }}>已修复</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#7F1D1D" }} />
+                  <span style={{ color: "#94A3B8" }}>未修复</span>
+                </div>
+              </div>
+            )}
+            {ch6Layer === "phase" && (
+              <div style={{ fontSize: 10, display: "flex", flexDirection: "column", gap: 3, marginTop: 4 }}>
+                {Object.entries(PHASE_COLORS).map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: 2, background: v }} />
+                    <span style={{ color: "#94A3B8" }}>{k}阶段</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>}
+
+          {/* Scale indicator */}
+          <div style={{
+            marginTop: "auto", padding: "8px 0",
+            borderTop: "1px solid rgba(100,116,139,0.15)",
+            fontSize: 10, color: "#475569",
+          }}>
+            <div>空间单元: 129 汇水单元</div>
+            <div>城市: 13 地级市</div>
+            <div>网格: 218,766 (1km²)</div>
+          </div>
+        </div>
+
+        {/* ─── Center: Map ─── */}
+        <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+          <svg viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`}
+            style={{ width: "100%", height: "100%", display: "block" }}>
+            
+            {/* City region hulls */}
+            {CITIES.map((city, ci) => {
+              const cityUnits = WATERSHED_DATA.filter(u => u.cityIdx === ci);
+              if (cityUnits.length < 3) return null;
+              const cx = cityUnits.reduce((s, u) => s + u.x, 0) / cityUnits.length;
+              const cy = cityUnits.reduce((s, u) => s + u.y, 0) / cityUnits.length;
+              return (
+                <text key={`label-${ci}`} x={cx} y={cy - 1.3} textAnchor="middle"
+                  style={{ fontSize: 0.55, fill: "rgba(148,163,184,0.5)", fontWeight: 500, fontFamily: "'Noto Sans SC'" }}>
+                  {city.name}
+                </text>
+              );
+            })}
+
+            {/* Watershed units */}
+            {WATERSHED_DATA.map(unit => {
+              const color = getUnitColor(unit);
+              const isSelected = selectedUnit === unit.id;
+              const isHovered = hoveredUnit === unit.id;
+              const isCurrentBatch = chapter === 6 && ch6Layer === "recovery" && recoveryState.currentBatch.includes(unit.id);
+              const radius = isCurrentBatch ? 0.55 : isSelected ? 0.5 : isHovered ? 0.48 : 0.38;
+              
+              return (
+                <g key={unit.id}>
+                  {/* Glow for current batch */}
+                  {isCurrentBatch && (
+                    <circle cx={unit.x} cy={unit.y} r={0.75} fill="none"
+                      stroke="#FBBF24" strokeWidth={0.06} opacity={0.5}>
+                      <animate attributeName="r" values="0.55;0.85;0.55" dur="1.2s" repeatCount="indefinite" />
+                      <animate attributeName="opacity" values="0.6;0.15;0.6" dur="1.2s" repeatCount="indefinite" />
+                    </circle>
+                  )}
+                  <circle cx={unit.x} cy={unit.y} r={radius} fill={color}
+                    stroke={isSelected ? "#fff" : isHovered ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.3)"}
+                    strokeWidth={isSelected ? 0.08 : 0.03}
+                    style={{ cursor: "pointer", transition: "fill 0.3s, r 0.2s" }}
+                    onClick={() => setSelectedUnit(unit.id === selectedUnit ? null : unit.id)}
+                    onMouseEnter={() => setHoveredUnit(unit.id)}
+                    onMouseLeave={() => setHoveredUnit(null)}
+                  />
+                  {/* Repair order label for small view */}
+                  {chapter === 6 && ch6Layer === "recovery" && isCurrentBatch && (
+                    <text x={unit.x} y={unit.y + 0.15} textAnchor="middle"
+                      style={{ fontSize: 0.28, fill: "#000", fontWeight: 700, fontFamily: "JetBrains Mono", pointerEvents: "none" }}>
+                      {unit.repairOrder + 1}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+
+          {/* Chapter title overlay */}
+          <div style={{
+            position: "absolute", top: 12, left: 16,
+            fontSize: 13, fontWeight: 600, color: "#94A3B8",
+          }}>
+            {chapter === 4 && "第四章 · 灾前韧性基线的双维评估与融合诊断"}
+            {chapter === 5 && "第五章 · 洪涝风险的时空格局与耦合驱动机制"}
+            {chapter === 6 && "第六章 · 灾后协同恢复优化与差异化策略"}
+          </div>
+
+          {/* Recovery Controls (Ch6) */}
+          {chapter === 6 && ch6Layer === "recovery" && (
+            <div style={{
+              position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)",
+              display: "flex", alignItems: "center", gap: 10,
+              background: "rgba(15,23,42,0.9)", padding: "8px 16px",
+              borderRadius: 8, border: "1px solid rgba(100,116,139,0.2)",
+              backdropFilter: "blur(8px)",
+            }}>
+              <button onClick={() => { setRecoveryStep(0); setIsPlaying(false); }}
+                style={btnStyle}>⏮</button>
+              <button onClick={() => setIsPlaying(!isPlaying)}
+                style={btnStyle}>{isPlaying ? "⏸" : "▶"}</button>
+              <button onClick={() => setRecoveryStep(s => Math.min(s + 1, 43))}
+                style={btnStyle}>⏭</button>
+              
+              <input type="range" min={0} max={43} value={recoveryStep}
+                onChange={e => { setRecoveryStep(+e.target.value); setIsPlaying(false); }}
+                style={{ width: 200, accentColor: "#3B82F6" }} />
+              
+              <span style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#93C5FD", minWidth: 80 }}>
+                Step {recoveryStep}/43
+              </span>
+              <span style={{ fontSize: 11, color: "#64748B" }}>
+                已修复: {recoveryState.currentRepaired.size}/129
+              </span>
+            </div>
+          )}
+
+          {/* Recovery Curve (Ch6) */}
+          {chapter === 6 && (
+            <div style={{
+              position: "absolute", bottom: ch6Layer === "recovery" ? 64 : 16, right: 16,
+              width: 260, height: 140,
+              background: "rgba(15,23,42,0.9)", padding: "10px 12px",
+              borderRadius: 8, border: "1px solid rgba(100,116,139,0.2)",
+            }}>
+              <div style={{ fontSize: 10, color: "#64748B", marginBottom: 4, fontWeight: 600 }}>
+                系统功能保留率 F(t)
+              </div>
+              <svg viewBox="0 0 240 100" style={{ width: "100%", height: 100 }}>
+                {/* Grid */}
+                {[0.5, 0.6, 0.7, 0.8].map(v => (
+                  <g key={v}>
+                    <line x1={25} y1={100 - v * 110} x2={240} y2={100 - v * 110}
+                      stroke="rgba(100,116,139,0.15)" strokeWidth={0.5} />
+                    <text x={22} y={100 - v * 110 + 3} textAnchor="end"
+                      style={{ fontSize: 6, fill: "#475569" }}>{v.toFixed(1)}</text>
+                  </g>
+                ))}
+                {/* F=1.0 line */}
+                <line x1={25} y1={100 - 1.0 * 110} x2={240} y2={100 - 1.0 * 110}
+                  stroke="rgba(59,130,246,0.3)" strokeWidth={0.5} strokeDasharray="3,3" />
+                
+                {/* Curve */}
+                <polyline fill="none" stroke="#3B82F6" strokeWidth={1.5}
+                  points={recoveryState.curve.slice(0, recoveryStep + 1).map((v, i) =>
+                    `${25 + i * (215 / 43)},${100 - v * 110}`).join(" ")} />
+                
+                {/* LoR area */}
+                {recoveryStep > 0 && (
+                  <polygon opacity={0.1} fill="#3B82F6"
+                    points={[
+                      ...recoveryState.curve.slice(0, recoveryStep + 1).map((v, i) =>
+                        `${25 + i * (215 / 43)},${100 - v * 110}`),
+                      `${25 + recoveryStep * (215 / 43)},${100 - 1.0 * 110}`,
+                      `25,${100 - 1.0 * 110}`,
+                    ].join(" ")} />
+                )}
+                
+                {/* Current point */}
+                {recoveryStep > 0 && (
+                  <circle cx={25 + recoveryStep * (215 / 43)}
+                    cy={100 - recoveryState.curve[recoveryStep] * 110}
+                    r={3} fill="#3B82F6" stroke="#fff" strokeWidth={1} />
+                )}
+                
+                {/* Labels */}
+                <text x={130} y={98} textAnchor="middle" style={{ fontSize: 6, fill: "#475569" }}>
+                  修复步 →
+                </text>
+                <text x={25 + recoveryStep * (215 / 43)} y={100 - recoveryState.curve[Math.min(recoveryStep, 43)] * 110 - 6}
+                  textAnchor="middle" style={{ fontSize: 7, fill: "#93C5FD", fontFamily: "JetBrains Mono" }}>
+                  {recoveryState.curve[Math.min(recoveryStep, 43)]?.toFixed(3)}
+                </text>
+              </svg>
+            </div>
+          )}
+
+          {/* Stats Cards */}
+          {chapter === 4 && (
+            <div style={{
+              position: "absolute", bottom: 16, right: 16,
+              display: "flex", flexDirection: "column", gap: 6,
+            }}>
+              {SUBSYSTEM_NAMES.map((name, i) => {
+                const key = SUBSYSTEM_KEYS[i];
+                const vals = WATERSHED_DATA.map(u => u[key]);
+                const avg = vals.reduce((s, v) => s + v, 0) / vals.length;
+                const weakCount = WATERSHED_DATA.filter(u => u.weakest === i).length;
+                return (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    background: "rgba(15,23,42,0.85)", padding: "5px 10px",
+                    borderRadius: 6, border: "1px solid rgba(100,116,139,0.15)",
+                    borderLeft: `3px solid ${SUBSYSTEM_COLORS[i]}`,
+                  }}>
+                    <span style={{ fontSize: 10, color: "#94A3B8", width: 80 }}>{name}</span>
+                    <span style={{ fontSize: 12, fontFamily: "JetBrains Mono", color: "#e2e8f0", fontWeight: 600 }}>
+                      {avg.toFixed(3)}
+                    </span>
+                    <span style={{ fontSize: 9, color: "#64748B" }}>
+                      最弱:{weakCount}个
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Quadrant Summary (Ch5) */}
+          {chapter === 5 && ch5Layer === "quadrant" && (
+            <div style={{
+              position: "absolute", bottom: 16, right: 16,
+              background: "rgba(15,23,42,0.9)", padding: 12,
+              borderRadius: 8, border: "1px solid rgba(100,116,139,0.2)",
+            }}>
+              <div style={{ fontSize: 10, color: "#64748B", marginBottom: 6, fontWeight: 600 }}>
+                风险-韧性四象限分布
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                {Object.entries(QUADRANT_LABELS).map(([k, v]) => {
+                  const count = WATERSHED_DATA.filter(u => u.quadrant === k).length;
+                  return (
+                    <div key={k} style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "4px 8px", borderRadius: 4,
+                      background: `${QUADRANT_COLORS[k]}15`,
+                    }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: QUADRANT_COLORS[k] }} />
+                      <span style={{ fontSize: 10, color: "#CBD5E1" }}>{v}</span>
+                      <span style={{ fontSize: 11, fontFamily: "JetBrains Mono", color: QUADRANT_COLORS[k], fontWeight: 600, marginLeft: "auto" }}>
+                        {count}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ─── Right: Detail Panel ─── */}
+        <div style={{
+          width: 240, padding: "14px 12px",
+          background: "rgba(15,23,42,0.6)",
+          borderLeft: "1px solid rgba(100,116,139,0.15)",
+          overflowY: "auto",
+        }}>
+          {displayUnit ? (
+            <>
+              <div style={{ fontSize: 10, color: "#64748B", fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>
+                汇水单元详情
+              </div>
+              <div style={{
+                padding: "8px 10px", borderRadius: 6, marginBottom: 10,
+                background: "rgba(30,41,59,0.8)", border: "1px solid rgba(100,116,139,0.15)",
+              }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#e2e8f0" }}>
+                  {displayUnit.cityName} · WS-{String(displayUnit.id + 1).padStart(3, "0")}
+                </div>
+                <div style={{ fontSize: 10, color: "#64748B", marginTop: 2 }}>
+                  汇水单元 #{displayUnit.id + 1}
+                </div>
+              </div>
+
+              {/* Ch4 Section */}
+              <DetailSection title="第四章 · 韧性基线" color="#3B82F6">
+                <BarIndicator label="综合NFR" value={displayUnit.nfr} color="#3B82F6" />
+                {SUBSYSTEM_NAMES.map((name, i) => (
+                  <BarIndicator key={i} label={name} value={displayUnit[SUBSYSTEM_KEYS[i]]}
+                    color={SUBSYSTEM_COLORS[i]}
+                    isWeakest={displayUnit.weakest === i} />
+                ))}
+              </DetailSection>
+
+              {/* Ch5 Section */}
+              <DetailSection title="第五章 · 洪涝风险" color="#EF4444">
+                <BarIndicator label="综合风险" value={displayUnit.riskScore} color="#EF4444" />
+                <BarIndicator label="H 危险性" value={displayUnit.hazard} color="#DC2626" />
+                <BarIndicator label="E 暴露性" value={displayUnit.exposure} color="#F97316" />
+                <BarIndicator label="S 敏感性" value={displayUnit.sensitivity} color="#EAB308" />
+                <BarIndicator label="A 适应性" value={displayUnit.adaptability} color="#22C55E" />
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 6, marginTop: 4,
+                  padding: "4px 8px", borderRadius: 4,
+                  background: `${QUADRANT_COLORS[displayUnit.quadrant]}20`,
+                }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: QUADRANT_COLORS[displayUnit.quadrant] }} />
+                  <span style={{ fontSize: 10, color: "#CBD5E1" }}>
+                    {displayUnit.quadrant} {QUADRANT_LABELS[displayUnit.quadrant]}
+                  </span>
+                </div>
+              </DetailSection>
+
+              {/* Ch6 Section */}
+              <DetailSection title="第六章 · 恢复优化" color="#10B981">
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 4 }}>
+                  <span style={{ color: "#94A3B8" }}>修复序号</span>
+                  <span style={{ fontFamily: "JetBrains Mono", color: "#e2e8f0", fontWeight: 600 }}>
+                    #{displayUnit.repairOrder + 1}/129
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 4 }}>
+                  <span style={{ color: "#94A3B8" }}>修复阶段</span>
+                  <span style={{
+                    padding: "1px 6px", borderRadius: 3, fontSize: 9,
+                    background: `${PHASE_COLORS[displayUnit.repairPhase]}25`,
+                    color: PHASE_COLORS[displayUnit.repairPhase],
+                    fontWeight: 600,
+                  }}>{displayUnit.repairPhase}</span>
+                </div>
+                <BarIndicator label="AELD权重" value={displayUnit.aeld / 50} color="#F59E0B" />
+                <BarIndicator label="枢纽权重" value={displayUnit.hubWeight} color="#8B5CF6" />
+                <BarIndicator label="初始损伤" value={displayUnit.damage} color="#EF4444" />
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginTop: 4 }}>
+                  <span style={{ color: "#94A3B8" }}>修复状态</span>
+                  <span style={{
+                    fontFamily: "JetBrains Mono", fontWeight: 600,
+                    color: recoveryState.currentRepaired.has(displayUnit.id) ? "#10B981" : "#EF4444",
+                  }}>
+                    {recoveryState.currentRepaired.has(displayUnit.id) ? "已修复" : "未修复"}
+                  </span>
+                </div>
+              </DetailSection>
+
+              {/* Radar */}
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 10, color: "#64748B", fontWeight: 600, marginBottom: 6 }}>
+                  四维韧性雷达
+                </div>
+                <svg viewBox="0 0 120 120" style={{ width: "100%" }}>
+                  {[0.25, 0.5, 0.75, 1].map(r => (
+                    <polygon key={r} fill="none" stroke="rgba(100,116,139,0.15)" strokeWidth={0.5}
+                      points={[0, 1, 2, 3].map(i => {
+                        const angle = (i / 4) * Math.PI * 2 - Math.PI / 2;
+                        return `${60 + Math.cos(angle) * r * 45},${60 + Math.sin(angle) * r * 45}`;
+                      }).join(" ")} />
+                  ))}
+                  {/* Axes labels */}
+                  {SUBSYSTEM_NAMES.map((name, i) => {
+                    const angle = (i / 4) * Math.PI * 2 - Math.PI / 2;
+                    return (
+                      <text key={i}
+                        x={60 + Math.cos(angle) * 54}
+                        y={60 + Math.sin(angle) * 54}
+                        textAnchor="middle" dominantBaseline="middle"
+                        style={{ fontSize: 5, fill: SUBSYSTEM_COLORS[i] }}>
+                        {name.replace("韧性", "")}
+                      </text>
+                    );
+                  })}
+                  {/* Data polygon */}
+                  <polygon
+                    fill="rgba(59,130,246,0.15)" stroke="#3B82F6" strokeWidth={1}
+                    points={SUBSYSTEM_KEYS.map((key, i) => {
+                      const angle = (i / 4) * Math.PI * 2 - Math.PI / 2;
+                      const v = displayUnit[key];
+                      return `${60 + Math.cos(angle) * v * 45},${60 + Math.sin(angle) * v * 45}`;
+                    }).join(" ")} />
+                  {/* Data points */}
+                  {SUBSYSTEM_KEYS.map((key, i) => {
+                    const angle = (i / 4) * Math.PI * 2 - Math.PI / 2;
+                    const v = displayUnit[key];
+                    return (
+                      <circle key={i}
+                        cx={60 + Math.cos(angle) * v * 45}
+                        cy={60 + Math.sin(angle) * v * 45}
+                        r={2.5} fill={SUBSYSTEM_COLORS[i]} stroke="#fff" strokeWidth={0.5} />
+                    );
+                  })}
+                </svg>
+              </div>
+            </>
+          ) : (
+            <div style={{
+              height: "100%", display: "flex", alignItems: "center", justifyContent: "center",
+              flexDirection: "column", gap: 8, color: "#475569", fontSize: 11,
+            }}>
+              <div style={{ fontSize: 24, opacity: 0.3 }}>◎</div>
+              <div>点击汇水单元查看详情</div>
+              <div style={{ fontSize: 10, color: "#334155", textAlign: "center", lineHeight: 1.5 }}>
+                悬停预览 · 点击锁定
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sub Components ───
+
+function LayerGroup({ label, options, value, onChange }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: "#94A3B8", fontWeight: 500, marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {options.map(opt => (
+          <button key={opt.key} onClick={() => onChange(opt.key)}
+            style={{
+              padding: "4px 8px", border: "none", cursor: "pointer",
+              borderRadius: 3, fontSize: 10, textAlign: "left",
+              fontFamily: "inherit",
+              background: value === opt.key ? "rgba(59,130,246,0.2)" : "transparent",
+              color: value === opt.key ? "#93C5FD" : "#64748B",
+              transition: "all 0.15s",
+            }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ColorBar({ scheme, label }) {
+  const gradient = scheme === "resilience"
+    ? "linear-gradient(to right, rgb(220,50,50), rgb(120,110,75), rgb(30,170,100))"
+    : "linear-gradient(to right, rgb(40,120,180), rgb(130,90,110), rgb(220,60,40))";
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ height: 6, borderRadius: 3, background: gradient }} />
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+        <span>{label[0]}</span><span>{label[1]}</span>
+      </div>
+    </div>
+  );
+}
+
+function DetailSection({ title, color, children }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 600, color, marginBottom: 6,
+        paddingBottom: 4, borderBottom: `1px solid ${color}30`,
+      }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function BarIndicator({ label, value, color, isWeakest }) {
+  return (
+    <div style={{ marginBottom: 3 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 1 }}>
+        <span style={{ color: isWeakest ? "#EF4444" : "#94A3B8" }}>
+          {label} {isWeakest && "⚠"}
+        </span>
+        <span style={{ fontFamily: "JetBrains Mono", fontSize: 10, color: "#e2e8f0" }}>
+          {value.toFixed(3)}
+        </span>
+      </div>
+      <div style={{ height: 3, borderRadius: 2, background: "rgba(51,65,85,0.5)" }}>
+        <div style={{
+          height: "100%", borderRadius: 2, background: color,
+          width: `${Math.min(value, 1) * 100}%`,
+          transition: "width 0.3s",
+        }} />
+      </div>
+    </div>
+  );
+}
+
+const btnStyle = {
+  padding: "4px 10px", border: "1px solid rgba(100,116,139,0.3)",
+  borderRadius: 4, background: "rgba(30,41,59,0.8)", color: "#e2e8f0",
+  cursor: "pointer", fontSize: 12, fontFamily: "inherit",
+};
