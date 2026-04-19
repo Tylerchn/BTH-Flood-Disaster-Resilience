@@ -170,6 +170,14 @@ greedy_df = curves[(curves["strategy"]=="greedy") &
 greedy_curve = [round(float(v),4) for v in greedy_df["F"].values] if len(greedy_df) else []
 print(f"   greedy 曲线长度={len(greedy_curve)}")
 
+# 所有 策略×情景 曲线矩阵:key = "strategy|scenario"
+print("   提取全部策略×情景矩阵...")
+all_curves = {}
+for (strat, scen), grp in curves.groupby(["strategy","scenario"]):
+    grp = grp.sort_values("step")
+    all_curves[f"{strat}|{scen}"] = [round(float(v),4) for v in grp["F"].values]
+print(f"   共 {len(all_curves)} 条曲线 ({len(curves['strategy'].unique())} 策略 × {len(curves['scenario'].unique())} 情景)")
+
 # ─── 9) 城市级NRI ───
 print("[8/11] 读取城市NRI...")
 cities_data = []
@@ -229,6 +237,9 @@ payload = {
         "bestVariant": "dueling_ddqn",
         "curveSteps": len(recovery_curve),
         "jenksBreaks": jenks_breaks,
+        "allCurves": all_curves,  # {"strategy|scenario": [F(0)..F(T)]}
+        "strategies": sorted(list(curves["strategy"].unique())),
+        "scenarios": sorted(list(curves["scenario"].unique())),
         "description": "京津冀城市群洪涝韧性全过程评估数据"
     }
 }

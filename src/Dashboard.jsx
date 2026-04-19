@@ -13,6 +13,39 @@ const SUB_NAMES = ["经济韧性","社会韧性","基础设施韧性","生态韧
 const SUB_KEYS = ["econR","socR","infraR","ecoR"];
 const SUB_COLORS = ["#f87171","#60a5fa","#34d399","#fbbf24"];
 
+// 可切换底图
+const BASEMAPS = [
+  {id:"dark",     label:"暗色",      style:"mapbox://styles/mapbox/dark-v11"},
+  {id:"light",    label:"亮色",      style:"mapbox://styles/mapbox/light-v11"},
+  {id:"sat",      label:"卫星",      style:"mapbox://styles/mapbox/satellite-v9"},
+  {id:"satSt",    label:"卫星+标注", style:"mapbox://styles/mapbox/satellite-streets-v12"},
+];
+
+// 策略对比配色(第六章恢复曲线)
+const STRATEGY_COLORS = {
+  "DRL_dueling_ddqn": "#3b82f6",
+  "greedy":           "#94a3b8",
+  "ael":              "#f59e0b",
+  "hub":              "#a78bfa",
+  "nfr_priority":     "#22d3ee",
+  "recovery_priority":"#ec4899",
+};
+const STRATEGY_LABELS = {
+  "DRL_dueling_ddqn": "DRL",
+  "greedy":           "贪心",
+  "ael":              "AEL 优先",
+  "hub":              "枢纽优先",
+  "nfr_priority":     "NFR 优先",
+  "recovery_priority":"恢复优先",
+};
+const SCENARIO_LABELS = {
+  "HIST":      "历史",
+  "SSP245":    "SSP2-4.5",
+  "SSP245_CL": "SSP2-4.5+",
+  "SSP585":    "SSP5-8.5",
+  "SSP585_CL": "SSP5-8.5+",
+};
+
 // ── 5 级 Jenks 调色板（由原连续 lerp 在 t=0,0.25,0.5,0.75,1 采样得到） ──
 const PAL_RES  = ["#be3c3c","#945844","#69734b","#3f8f53","#14aa5a"]; // 低(红) → 高(绿)
 const PAL_RISK = ["#1e64a0","#505981","#824e62","#b44242","#e63723"]; // 低(蓝) → 高(红)
@@ -52,10 +85,18 @@ export default function Dashboard(){
   const [showCounties,setShowCounties]=useState(false);
   const [showCountyLabels,setShowCountyLabels]=useState(false);
   const [showNetEdges,setShowNetEdges]=useState(false);
+  const [basemap,setBasemap]=useState("dark");
+  const [styleEpoch,setStyleEpoch]=useState(0);
+  const [scenario,setScenario]=useState("SSP585");
+  const [showAllStrategies,setShowAllStrategies]=useState(true);
   const timer=useRef(null);
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
   const geoRef=useRef(null);
+  const citiesGeoRef=useRef(null);
+  const countiesGeoRef=useRef(null);
+  const edgesGeoRef=useRef(null);
+  const togglesRef=useRef({cities:false,counties:false,edges:false});
   const hovIdRef=useRef(null);
 
   // Load data
@@ -87,6 +128,39 @@ export default function Dashboard(){
   },[playing]);
 
 
+  // 归一化 F(t) 曲线到 44 步:去除连续重复 + 尾部填充 + 截断
+  const normalizeCurve=(rc)=>{
+    if(!rc||rc.length===0)return Array(44).fill(0.846);
+    let r=[...rc];
+    if(r.length>50){
+      const d=[r[0]];
+      for(let i=1;i<r.length;i++){ if(Math.abs(r[i]-d[d.length-1])>0.0001)d.push(r[i]); }
+      r=d;
+    }
+    while(r.length<44)r.push(r[r.length-1]||0.846);
+    if(r.length>44)r=r.slice(0,44);
+    return r;
+  };
+
+  // 主恢复曲线(根据选中情景)
+  const primaryCurve=useMemo(()=>{
+    if(!data)return[];
+    const key=`DRL_dueling_ddqn|${scenario}`;
+    const raw=data.meta?.allCurves?.[key];
+    return raw?normalizeCurve(raw):data.rc;
+  },[data,scenario]);
+
+  // 策略对比曲线(只有 SSP585 有 5 条基线策略)
+  const comparisonCurves=useMemo(()=>{
+    if(!data?.meta?.allCurves||scenario!=="SSP585")return[];
+    const strats=["greedy","ael","hub","nfr_priority","recovery_priority"];
+    return strats.map(s=>{
+      const raw=data.meta.allCurves[`${s}|SSP585`];
+      if(!raw)return null;
+      return{strategy:s,curve:normalizeCurve(raw),color:STRATEGY_COLORS[s]};
+    }).filter(Boolean);
+  },[data,scenario]);
+
   // Recovery state
   const recState=useMemo(()=>{
     if(!data)return{repaired:new Set(),batch:[],curve:[0.49]};
@@ -99,8 +173,8 @@ export default function Dashboard(){
     }
     const cur=step>0?steps[Math.min(step-1,42)]:new Set();
     const batch=step>0&&step<=43?sorted.slice((step-1)*3,(step-1)*3+3).map(u=>u.id):[];
-    return{repaired:cur,batch,curve:data.rc};
-  },[step,data]);
+    return{repaired:cur,batch,curve:primaryCurve};
+  },[step,data,primaryCurve]);
 
   // Color (Jenks 5-class)
   const getColor=useCallback((u)=>{
@@ -121,21 +195,30 @@ export default function Dashboard(){
         if(recState.repaired.has(u.id))return"#22c55e";
         return v2c(u.damage,"risk","damage",jb);
       }
-      if(layer6==="aeld")  return v2c(u.aeld,"risk","aeld",jb);
-      if(layer6==="damage")return v2c(u.damage,"risk","damage",jb);
+      if(layer6==="aeld")       return v2c(u.aeld,"risk","aeld",jb);
+      if(layer6==="damage")     return v2c(u.damage,"risk","damage",jb);
+      if(layer6==="hubWeight")  return v2c(u.hubWeight,"risk","hubWeight",jb);
+      if(layer6==="inundDepth") return v2c(u.inundDepth,"risk","inundDepth",jb);
+      if(layer6==="roadDamage") return v2c(u.roadDamageRate,"risk","roadDamageRate",jb);
     }
     return"#555";
   },[ch,layer4,layer5,layer6,recState,data]);
+
+  // ── toggles 实时同步到 ref(给 style.load 回调用,避免闭包陈旧) ──
+  useEffect(()=>{
+    togglesRef.current={cities:showCities,counties:showCounties,edges:showNetEdges};
+  },[showCities,showCounties,showNetEdges]);
 
   // ── Mapbox init(data 就绪时只建一次) ──
   useEffect(()=>{
     if(!data||mapRef.current||!mapContainer.current)return;
     if(!mapboxgl.accessToken){ setMapError("缺少 Mapbox token"); return; }
+    const initStyle=(BASEMAPS.find(b=>b.id===basemap)||BASEMAPS[0]).style;
     let map;
     try{
       map=new mapboxgl.Map({
         container:mapContainer.current,
-        style:"mapbox://styles/mapbox/dark-v11",
+        style:initStyle,
         center:[116.3,39.6],
         zoom:5.9,
         minZoom:4,
@@ -146,129 +229,129 @@ export default function Dashboard(){
     mapRef.current=map;
     map.on("error",(e)=>{ if(e?.error?.status===401)setMapError("Mapbox token 无效(401)"); });
 
-    map.on("load",async ()=>{
-      try{
-        const geo=await fetch(import.meta.env.BASE_URL+"watersheds.geojson").then(r=>{
-          if(!r.ok)throw new Error("HTTP "+r.status);
-          return r.json();
-        });
-        // 初始颜色注入 feature.properties._color
-        geo.features.forEach(f=>{
-          const u=data.units.find(x=>x.wsId===f.properties.id);
-          f.properties._color=u?"#666":"#444"; // 占位,稍后刷新
-        });
-        geoRef.current=geo;
-        map.addSource("ws",{type:"geojson",data:geo,promoteId:"id"});
+    // 并行拉取所有 geojson,缓存到 ref(仅做一次)
+    const base=import.meta.env.BASE_URL;
+    const pFetch=(f)=>fetch(base+f).then(r=>r.ok?r.json():Promise.reject(r.status)).catch(e=>{console.warn(f+"加载失败:",e);return null;});
+    Promise.all([
+      pFetch("watersheds.geojson"),
+      pFetch("cities.geojson"),
+      pFetch("counties.geojson"),
+      pFetch("city_edges_g1.geojson"),
+    ]).then(([ws,cs,cn,eg])=>{
+      if(!ws){ setMapError("watersheds.geojson 加载失败"); return; }
+      ws.features.forEach(f=>{
+        const u=data.units.find(x=>x.wsId===f.properties.id);
+        f.properties._color=u?"#666":"#444";
+      });
+      geoRef.current=ws;
+      citiesGeoRef.current=cs;
+      countiesGeoRef.current=cn;
+      edgesGeoRef.current=eg;
+      if(map.isStyleLoaded())addLayers(map);
+      setMapReady(true);
+    });
 
-        map.addLayer({
-          id:"ws-fill",type:"fill",source:"ws",
-          paint:{
-            "fill-color":["get","_color"],
-            "fill-opacity":[
-              "case",
-              ["boolean",["feature-state","selected"],false],0.92,
-              ["boolean",["feature-state","hover"],false],0.82,
-              0.62,
-            ],
-          },
-        });
-        map.addLayer({
-          id:"ws-line",type:"line",source:"ws",
-          paint:{
-            "line-color":[
-              "case",
-              ["boolean",["feature-state","selected"],false],"#ffffff",
-              ["boolean",["feature-state","hover"],false],"rgba(255,255,255,0.65)",
-              "rgba(255,255,255,0.22)",
-            ],
-            "line-width":[
-              "case",
-              ["boolean",["feature-state","selected"],false],2.2,
-              ["boolean",["feature-state","hover"],false],1.4,
-              0.5,
-            ],
-          },
-        });
+    // style.load 事件:初始 + 每次 setStyle 都会触发
+    map.on("style.load",()=>{
+      if(geoRef.current)addLayers(map);
+      setStyleEpoch(e=>e+1);
+    });
 
-        // 行政叠加图层(城市/区县) — 初始隐藏,由 toggle 切换
-        try{
-          const citiesGeo=await fetch(import.meta.env.BASE_URL+"cities.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
-          map.addSource("cities",{type:"geojson",data:citiesGeo});
-          map.addLayer({
-            id:"cities-line",type:"line",source:"cities",
-            layout:{visibility:"none"},
-            paint:{"line-color":"#fbbf24","line-width":1.8,"line-opacity":0.85},
-          });
-        }catch(e){ console.warn("cities.geojson 加载失败:",e); }
-        try{
-          const countiesGeo=await fetch(import.meta.env.BASE_URL+"counties.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
-          map.addSource("counties",{type:"geojson",data:countiesGeo});
-          map.addLayer({
-            id:"counties-line",type:"line",source:"counties",
-            layout:{visibility:"none"},
-            paint:{"line-color":"rgba(56,189,248,0.75)","line-width":0.9,"line-dasharray":[2,2]}, // 青色,明显区别于汇水白边
-          });
-        }catch(e){ console.warn("counties.geojson 加载失败:",e); }
-
-        // 城市间网络边(第四章网络联系韧性)
-        try{
-          const edgesGeo=await fetch(import.meta.env.BASE_URL+"city_edges_g1.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
-          map.addSource("net-edges",{type:"geojson",data:edgesGeo});
-          // 主线:按 W_sym(w) 线性映射到 0.6-4px
-          map.addLayer({
-            id:"net-edges-line",type:"line",source:"net-edges",
-            layout:{visibility:"none","line-cap":"round"},
-            paint:{
-              "line-color":[
-                "match",["get","cls"],
-                1,"#64748b",
-                2,"#3b82f6",
-                3,"#8b5cf6",
-                4,"#ec4899",
-                5,"#ef4444",
-                "#94a3b8",
-              ],
-              "line-width":["interpolate",["linear"],["get","w"],0,0.6,1,4.0],
-              "line-opacity":0.75,
-            },
-          });
-        }catch(e){ console.warn("city_edges_g1.geojson 加载失败:",e); }
-
-        // 城市质心 -> 标签符号层(用 HTML overlay 以避开 Mapbox CJK 字形依赖)
-        // 下面 mousemove/leave/click 均以 promoteId=id 对应的 feature.id 为主键(= wsId 1-129)
-        map.on("mousemove","ws-fill",(e)=>{
-          if(!e.features?.length)return;
-          const f=e.features[0];
-          if(hovIdRef.current!==null&&hovIdRef.current!==f.id){
-            map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
-          }
-          hovIdRef.current=f.id;
-          map.setFeatureState({source:"ws",id:f.id},{hover:true});
-          map.getCanvas().style.cursor="pointer";
-          setHov(f.properties.id-1); // wsId→id 0-based
-        });
-        map.on("mouseleave","ws-fill",()=>{
-          if(hovIdRef.current!==null){
-            map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
-            hovIdRef.current=null;
-          }
-          map.getCanvas().style.cursor="";
-          setHov(null);
-        });
-        map.on("click","ws-fill",(e)=>{
-          if(!e.features?.length)return;
-          const idZero=e.features[0].properties.id-1;
-          setSel(prev=>prev===idZero?null:idZero);
-        });
-
-        setMapReady(true);
-      }catch(err){
-        setMapError(String(err.message||err));
+    // 持久监听:直接挂在 map 上,不绑定到 layer id,存活于 setStyle
+    map.on("mousemove",(e)=>{
+      const feats=map.queryRenderedFeatures(e.point,{layers:["ws-fill"]});
+      if(feats.length===0){
+        if(hovIdRef.current!==null){
+          map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
+          hovIdRef.current=null;
+        }
+        map.getCanvas().style.cursor="";
+        setHov(null);
+        return;
       }
+      const f=feats[0];
+      if(hovIdRef.current!==null&&hovIdRef.current!==f.id){
+        map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
+      }
+      hovIdRef.current=f.id;
+      map.setFeatureState({source:"ws",id:f.id},{hover:true});
+      map.getCanvas().style.cursor="pointer";
+      setHov(f.properties.id-1);
+    });
+    map.on("click",(e)=>{
+      const feats=map.queryRenderedFeatures(e.point,{layers:["ws-fill"]});
+      if(feats.length===0)return;
+      const idZero=feats[0].properties.id-1;
+      setSel(prev=>prev===idZero?null:idZero);
     });
 
     return()=>{ map.remove(); mapRef.current=null; setMapReady(false); };
   },[data]);
+
+  // ── 内部辅助:把所有自定义 source/layer 加回当前 style(幂等) ──
+  function addLayers(map){
+    const ws=geoRef.current; if(!ws)return;
+    if(!map.getSource("ws")){
+      map.addSource("ws",{type:"geojson",data:ws,promoteId:"id"});
+      map.addLayer({
+        id:"ws-fill",type:"fill",source:"ws",
+        paint:{
+          "fill-color":["get","_color"],
+          "fill-opacity":["case",
+            ["boolean",["feature-state","selected"],false],0.92,
+            ["boolean",["feature-state","hover"],false],0.82,
+            0.62,
+          ],
+        },
+      });
+      map.addLayer({
+        id:"ws-line",type:"line",source:"ws",
+        paint:{
+          "line-color":["case",
+            ["boolean",["feature-state","selected"],false],"#ffffff",
+            ["boolean",["feature-state","hover"],false],"rgba(255,255,255,0.65)",
+            "rgba(255,255,255,0.22)",
+          ],
+          "line-width":["case",
+            ["boolean",["feature-state","selected"],false],2.2,
+            ["boolean",["feature-state","hover"],false],1.4,
+            0.5,
+          ],
+        },
+      });
+    }
+    const tog=togglesRef.current;
+    if(citiesGeoRef.current&&!map.getSource("cities")){
+      map.addSource("cities",{type:"geojson",data:citiesGeoRef.current});
+      map.addLayer({id:"cities-line",type:"line",source:"cities",
+        layout:{visibility:tog.cities?"visible":"none"},
+        paint:{"line-color":"#fbbf24","line-width":1.8,"line-opacity":0.85}});
+    }
+    if(countiesGeoRef.current&&!map.getSource("counties")){
+      map.addSource("counties",{type:"geojson",data:countiesGeoRef.current});
+      map.addLayer({id:"counties-line",type:"line",source:"counties",
+        layout:{visibility:tog.counties?"visible":"none"},
+        paint:{"line-color":"rgba(56,189,248,0.75)","line-width":0.9,"line-dasharray":[2,2]}});
+    }
+    if(edgesGeoRef.current&&!map.getSource("net-edges")){
+      map.addSource("net-edges",{type:"geojson",data:edgesGeoRef.current});
+      map.addLayer({id:"net-edges-line",type:"line",source:"net-edges",
+        layout:{visibility:tog.edges?"visible":"none","line-cap":"round"},
+        paint:{
+          "line-color":["match",["get","cls"],1,"#64748b",2,"#3b82f6",3,"#8b5cf6",4,"#ec4899",5,"#ef4444","#94a3b8"],
+          "line-width":["interpolate",["linear"],["get","w"],0,0.6,1,4.0],
+          "line-opacity":0.75,
+        }});
+    }
+  }
+
+  // ── 底图切换 ──
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map)return;
+    const entry=BASEMAPS.find(b=>b.id===basemap);
+    if(entry)map.setStyle(entry.style);
+  },[basemap]);
 
   // ── 颜色刷新:图层/步骤改变时重算每个 feature._color 并 setData ──
   useEffect(()=>{
@@ -282,36 +365,36 @@ export default function Dashboard(){
       f.properties._color=u?getColor(u):"#444";
     });
     src.setData(geo);
-  },[getColor,data,mapReady]);
+  },[getColor,data,mapReady,styleEpoch]);
 
-  // ── 行政叠加可见性同步 ──
+  // ── 行政叠加可见性同步(依赖 styleEpoch 确保切底图后重应用) ──
   useEffect(()=>{
     const map=mapRef.current;
     if(!map||!mapReady||!map.getLayer("cities-line"))return;
     map.setLayoutProperty("cities-line","visibility",showCities?"visible":"none");
-  },[showCities,mapReady]);
+  },[showCities,mapReady,styleEpoch]);
   useEffect(()=>{
     const map=mapRef.current;
     if(!map||!mapReady||!map.getLayer("counties-line"))return;
     map.setLayoutProperty("counties-line","visibility",showCounties?"visible":"none");
-  },[showCounties,mapReady]);
+  },[showCounties,mapReady,styleEpoch]);
   useEffect(()=>{
     const map=mapRef.current;
     if(!map||!mapReady||!map.getLayer("net-edges-line"))return;
     map.setLayoutProperty("net-edges-line","visibility",showNetEdges?"visible":"none");
-  },[showNetEdges,mapReady]);
+  },[showNetEdges,mapReady,styleEpoch]);
 
   // ── 选中同步:sel 变化时更新 feature-state.selected ──
   useEffect(()=>{
     const map=mapRef.current;
-    if(!map||!mapReady||!data)return;
+    if(!map||!mapReady||!data||!map.getSource("ws"))return;
     data.units.forEach(u=>{
       map.setFeatureState({source:"ws",id:u.wsId},{selected:false});
     });
     if(sel!=null&&data.units[sel]){
       map.setFeatureState({source:"ws",id:data.units[sel].wsId},{selected:true});
     }
-  },[sel,data,mapReady]);
+  },[sel,data,mapReady,styleEpoch]);
 
   if(loading)return(
     <div style={{width:"100%",height:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",
@@ -406,13 +489,17 @@ export default function Dashboard(){
           </>}
           {ch===6&&<>
             <LG label="恢复" opts={[
-              {k:"recovery",l:"修复动画"},{k:"aeld",l:"年期望经济损失"},
-              {k:"damage",l:"初始损伤"},{k:"phase",l:"修复阶段"},
+              {k:"recovery",l:"修复动画"},{k:"phase",l:"修复阶段"},
+              {k:"aeld",l:"年期望经济损失"},{k:"damage",l:"初始损伤"},
+              {k:"hubWeight",l:"三层网络枢纽权重"},{k:"inundDepth",l:"百年一遇淹没深度"},
+              {k:"roadDamage",l:"道路损伤率"},
             ]} v={layer6} set={setLayer6}/>
             {layer6==="recovery"&&<Legnd items={[
               {c:"#fbbf24",l:"当前修复",g:true},{c:"#22c55e",l:"已修复"},{c:"#7f1d1d",l:"未修复"}]}/>}
             {layer6==="phase"&&<Legnd items={Object.entries(PHASE_COLORS).map(([k,v])=>({c:v,l:k}))}/>}
-            {(layer6==="aeld"||layer6==="damage")&&<CB s="risk" field={layer6} breaks={data.jenks}/>}
+            {(layer6==="aeld"||layer6==="damage"||layer6==="hubWeight"||layer6==="inundDepth")
+              &&<CB s="risk" field={layer6==="hubWeight"?"hubWeight":layer6==="inundDepth"?"inundDepth":layer6} breaks={data.jenks}/>}
+            {layer6==="roadDamage"&&<CB s="risk" field="roadDamageRate" breaks={data.jenks}/>}
           </>}
           {/* 行政叠加切换 */}
           <div style={{marginTop:8,paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)"}}>
@@ -454,6 +541,21 @@ export default function Dashboard(){
             {ch===4&&"第四章 · 灾前韧性基线"}{ch===5&&"第五章 · 洪涝风险时空格局"}{ch===6&&"第六章 · 灾后协同恢复优化"}
           </div>
 
+          {/* 底图切换 */}
+          <div style={{position:"absolute",top:10,right:14,display:"flex",gap:2,
+            background:"rgba(8,12,20,0.85)",padding:3,borderRadius:6,
+            border:"1px solid rgba(255,255,255,0.08)",backdropFilter:"blur(8px)"}}>
+            {BASEMAPS.map(b=>(
+              <button key={b.id} onClick={()=>setBasemap(b.id)} style={{
+                padding:"4px 9px",border:"none",borderRadius:4,cursor:"pointer",
+                fontSize:11,fontFamily:"inherit",fontWeight:500,
+                background:basemap===b.id?"rgba(59,130,246,0.28)":"transparent",
+                color:basemap===b.id?"#bfdbfe":"#94a3b8",
+                transition:"all 0.12s",
+              }}>{b.label}</button>
+            ))}
+          </div>
+
           {/* Recovery controls */}
           {ch===6&&layer6==="recovery"&&(
             <div style={{
@@ -475,25 +577,44 @@ export default function Dashboard(){
             </div>
           )}
 
-          {/* Recovery curve */}
+          {/* Recovery curve + 情景切换 + 策略对比 */}
           {ch===6&&(
             <div style={{
               position:"absolute",bottom:layer6==="recovery"?56:12,right:12,
-              width:280,height:150,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
+              width:340,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
               borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",
             }}>
-              <div style={{fontSize:11,color:"#64748b",marginBottom:4,fontWeight:600,letterSpacing:0.5}}>恢复曲线</div>
-              <svg viewBox="0 0 220 100" style={{width:"100%",height:95}}>
-                {[0.5,0.6,0.7,0.8].map(v=>(
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                <div style={{fontSize:12,color:"#93c5fd",fontWeight:600,letterSpacing:0.3}}>恢复曲线</div>
+                <div style={{fontSize:10,color:"#475569",fontFamily:"JetBrains Mono"}}>F(t) · {SCENARIO_LABELS[scenario]||scenario}</div>
+              </div>
+              {/* 情景切换 */}
+              <div style={{display:"flex",gap:2,marginBottom:5,flexWrap:"wrap"}}>
+                {["HIST","SSP245","SSP245_CL","SSP585","SSP585_CL"].map(sc=>(
+                  <button key={sc} onClick={()=>setScenario(sc)} style={{
+                    padding:"3px 7px",border:"none",borderRadius:3,cursor:"pointer",
+                    fontSize:10,fontFamily:"inherit",fontWeight:500,flex:1,
+                    background:scenario===sc?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.04)",
+                    color:scenario===sc?"#bfdbfe":"#64748b",
+                    transition:"all 0.12s",
+                  }}>{SCENARIO_LABELS[sc]}</button>
+                ))}
+              </div>
+              <svg viewBox="0 0 220 100" style={{width:"100%",height:110,display:"block"}}>
+                {[0.5,0.6,0.7,0.8,0.9].map(v=>(
                   <g key={v}>
                     <line x1={24} y1={100-v*110} x2={220} y2={100-v*110} stroke="rgba(255,255,255,0.06)" strokeWidth={0.5}/>
                     <text x={21} y={100-v*110+3} textAnchor="end" style={{fontSize:5.5,fill:"#334155"}}>{v.toFixed(1)}</text>
                   </g>
                 ))}
                 <line x1={24} y1={100-110} x2={220} y2={100-110} stroke="rgba(59,130,246,0.15)" strokeWidth={0.5} strokeDasharray="2,2"/>
-                {data.gc.length>0&&<polyline fill="none" stroke="#334155" strokeWidth={0.8} strokeDasharray="2,1.5"
-                  points={data.gc.map((v,i)=>`${24+i*(196/43)},${100-v*110}`).join(" ")}/>}
-                <polyline fill="none" stroke="#3b82f6" strokeWidth={1.2}
+                {/* 策略对比(仅 SSP585 且开关打开):5 条基线策略 */}
+                {scenario==="SSP585"&&showAllStrategies&&comparisonCurves.map(cc=>(
+                  <polyline key={cc.strategy} fill="none" stroke={cc.color} strokeWidth={0.7} strokeDasharray="2,1.5" opacity={0.75}
+                    points={cc.curve.map((v,i)=>`${24+i*(196/43)},${100-v*110}`).join(" ")}/>
+                ))}
+                {/* 主曲线:DRL 在所选情景下 */}
+                <polyline fill="none" stroke={STRATEGY_COLORS.DRL_dueling_ddqn} strokeWidth={1.4}
                   points={recState.curve.slice(0,step+1).map((v,i)=>`${24+i*(196/43)},${100-v*110}`).join(" ")}/>
                 {step>0&&<polygon opacity={0.08} fill="#3b82f6"
                   points={[...recState.curve.slice(0,step+1).map((v,i)=>`${24+i*(196/43)},${100-v*110}`),
@@ -503,11 +624,32 @@ export default function Dashboard(){
                 {step>0&&<text x={24+step*(196/43)} y={100-recState.curve[step]*110-5} textAnchor="middle"
                   style={{fontSize:6,fill:"#93c5fd",fontFamily:"JetBrains Mono"}}>{recState.curve[step]?.toFixed(4)}</text>}
                 <text x={122} y={98} textAnchor="middle" style={{fontSize:5,fill:"#334155"}}>修复步 →</text>
-                <line x1={160} y1={6} x2={172} y2={6} stroke="#3b82f6" strokeWidth={1.2}/>
-                <text x={175} y={8} style={{fontSize:4.5,fill:"#64748b"}}>DRL</text>
-                {data.gc.length>0&&<><line x1={190} y1={6} x2={202} y2={6} stroke="#334155" strokeWidth={0.8} strokeDasharray="2,1.5"/>
-                <text x={205} y={8} style={{fontSize:4.5,fill:"#334155"}}>贪心</text></>}
               </svg>
+              {/* 策略图例 + 对比开关 */}
+              {scenario==="SSP585"?(
+                <div style={{display:"flex",flexWrap:"wrap",gap:"3px 9px",fontSize:9.5,marginTop:4,alignItems:"center"}}>
+                  <button onClick={()=>setShowAllStrategies(v=>!v)} style={{
+                    padding:"2px 6px",border:"1px solid rgba(255,255,255,0.1)",borderRadius:3,cursor:"pointer",
+                    fontFamily:"inherit",fontSize:9,fontWeight:600,
+                    background:showAllStrategies?"rgba(59,130,246,0.2)":"transparent",
+                    color:showAllStrategies?"#bfdbfe":"#64748b",
+                  }}>策略对比 {showAllStrategies?"✓":"×"}</button>
+                  {Object.entries(STRATEGY_LABELS).map(([k,l])=>{
+                    const isDRL=k==="DRL_dueling_ddqn";
+                    const active=isDRL||showAllStrategies;
+                    return(
+                      <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4,opacity:active?1:0.3}}>
+                        <span style={{display:"inline-block",width:14,borderTop:`${isDRL?"1.5px solid":"1px dashed"} ${STRATEGY_COLORS[k]}`}}/>
+                        <span style={{color:isDRL?"#bfdbfe":"#94a3b8"}}>{l}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              ):(
+                <div style={{fontSize:9.5,color:"#64748b",marginTop:4,fontStyle:"italic"}}>
+                  仅 SSP5-8.5 有完整策略对比数据;当前显示 DRL 单曲线
+                </div>
+              )}
             </div>
           )}
 
