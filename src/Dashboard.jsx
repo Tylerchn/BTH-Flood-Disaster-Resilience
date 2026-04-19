@@ -21,31 +21,6 @@ const BASEMAPS = [
   {id:"satSt",    label:"卫星+标注", style:"mapbox://styles/mapbox/satellite-streets-v12"},
 ];
 
-// 策略对比配色(第六章恢复曲线)
-const STRATEGY_COLORS = {
-  "DRL_dueling_ddqn": "#3b82f6",
-  "greedy":           "#94a3b8",
-  "ael":              "#f59e0b",
-  "hub":              "#a78bfa",
-  "nfr_priority":     "#22d3ee",
-  "recovery_priority":"#ec4899",
-};
-const STRATEGY_LABELS = {
-  "DRL_dueling_ddqn": "DRL",
-  "greedy":           "贪心",
-  "ael":              "AEL 优先",
-  "hub":              "枢纽优先",
-  "nfr_priority":     "NFR 优先",
-  "recovery_priority":"恢复优先",
-};
-const SCENARIO_LABELS = {
-  "HIST":      "历史",
-  "SSP245":    "SSP2-4.5",
-  "SSP245_CL": "SSP2-4.5+",
-  "SSP585":    "SSP5-8.5",
-  "SSP585_CL": "SSP5-8.5+",
-};
-
 // ── 5 级 Jenks 调色板（由原连续 lerp 在 t=0,0.25,0.5,0.75,1 采样得到） ──
 const PAL_RES  = ["#be3c3c","#945844","#69734b","#3f8f53","#14aa5a"]; // 低(红) → 高(绿)
 const PAL_RISK = ["#1e64a0","#505981","#824e62","#b44242","#e63723"]; // 低(蓝) → 高(红)
@@ -87,8 +62,6 @@ export default function Dashboard(){
   const [showNetEdges,setShowNetEdges]=useState(false);
   const [basemap,setBasemap]=useState("dark");
   const [styleEpoch,setStyleEpoch]=useState(0);
-  const [scenario,setScenario]=useState("SSP585");
-  const [showAllStrategies,setShowAllStrategies]=useState(true);
   const timer=useRef(null);
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
@@ -129,39 +102,6 @@ export default function Dashboard(){
   },[playing]);
 
 
-  // 归一化 F(t) 曲线到 44 步:去除连续重复 + 尾部填充 + 截断
-  const normalizeCurve=(rc)=>{
-    if(!rc||rc.length===0)return Array(44).fill(0.846);
-    let r=[...rc];
-    if(r.length>50){
-      const d=[r[0]];
-      for(let i=1;i<r.length;i++){ if(Math.abs(r[i]-d[d.length-1])>0.0001)d.push(r[i]); }
-      r=d;
-    }
-    while(r.length<44)r.push(r[r.length-1]||0.846);
-    if(r.length>44)r=r.slice(0,44);
-    return r;
-  };
-
-  // 主恢复曲线(根据选中情景)
-  const primaryCurve=useMemo(()=>{
-    if(!data)return[];
-    const key=`DRL_dueling_ddqn|${scenario}`;
-    const raw=data.meta?.allCurves?.[key];
-    return raw?normalizeCurve(raw):data.rc;
-  },[data,scenario]);
-
-  // 策略对比曲线(只有 SSP585 有 5 条基线策略)
-  const comparisonCurves=useMemo(()=>{
-    if(!data?.meta?.allCurves||scenario!=="SSP585")return[];
-    const strats=["greedy","ael","hub","nfr_priority","recovery_priority"];
-    return strats.map(s=>{
-      const raw=data.meta.allCurves[`${s}|SSP585`];
-      if(!raw)return null;
-      return{strategy:s,curve:normalizeCurve(raw),color:STRATEGY_COLORS[s]};
-    }).filter(Boolean);
-  },[data,scenario]);
-
   // Recovery state
   const recState=useMemo(()=>{
     if(!data)return{repaired:new Set(),batch:[],curve:[0.49]};
@@ -174,8 +114,8 @@ export default function Dashboard(){
     }
     const cur=step>0?steps[Math.min(step-1,42)]:new Set();
     const batch=step>0&&step<=43?sorted.slice((step-1)*3,(step-1)*3+3).map(u=>u.id):[];
-    return{repaired:cur,batch,curve:primaryCurve};
-  },[step,data,primaryCurve]);
+    return{repaired:cur,batch,curve:data.rc};
+  },[step,data]);
 
   // Color (Jenks 5-class)
   const getColor=useCallback((u)=>{
@@ -588,29 +528,14 @@ export default function Dashboard(){
             </div>
           )}
 
-          {/* Recovery curve + 情景切换 + 策略对比 */}
+          {/* Recovery curve */}
           {ch===6&&(
             <div style={{
               position:"absolute",bottom:layer6==="recovery"?56:12,right:12,
-              width:340,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
+              width:280,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
               borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",
             }}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                <div style={{fontSize:12,color:"#93c5fd",fontWeight:600,letterSpacing:0.3}}>恢复曲线</div>
-                <div style={{fontSize:10,color:"#475569",fontFamily:"JetBrains Mono"}}>F(t) · {SCENARIO_LABELS[scenario]||scenario}</div>
-              </div>
-              {/* 情景切换 */}
-              <div style={{display:"flex",gap:2,marginBottom:5,flexWrap:"wrap"}}>
-                {["HIST","SSP245","SSP245_CL","SSP585","SSP585_CL"].map(sc=>(
-                  <button key={sc} onClick={()=>setScenario(sc)} style={{
-                    padding:"3px 7px",border:"none",borderRadius:3,cursor:"pointer",
-                    fontSize:10,fontFamily:"inherit",fontWeight:500,flex:1,
-                    background:scenario===sc?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.04)",
-                    color:scenario===sc?"#bfdbfe":"#64748b",
-                    transition:"all 0.12s",
-                  }}>{SCENARIO_LABELS[sc]}</button>
-                ))}
-              </div>
+              <div style={{fontSize:12,color:"#93c5fd",fontWeight:600,letterSpacing:0.3,marginBottom:6}}>恢复曲线</div>
               <svg viewBox="0 0 220 100" style={{width:"100%",height:110,display:"block"}}>
                 {[0.5,0.6,0.7,0.8,0.9].map(v=>(
                   <g key={v}>
@@ -619,13 +544,7 @@ export default function Dashboard(){
                   </g>
                 ))}
                 <line x1={24} y1={100-110} x2={220} y2={100-110} stroke="rgba(59,130,246,0.15)" strokeWidth={0.5} strokeDasharray="2,2"/>
-                {/* 策略对比(仅 SSP585 且开关打开):5 条基线策略 */}
-                {scenario==="SSP585"&&showAllStrategies&&comparisonCurves.map(cc=>(
-                  <polyline key={cc.strategy} fill="none" stroke={cc.color} strokeWidth={0.7} strokeDasharray="2,1.5" opacity={0.75}
-                    points={cc.curve.map((v,i)=>`${24+i*(196/43)},${100-v*110}`).join(" ")}/>
-                ))}
-                {/* 主曲线:DRL 在所选情景下 */}
-                <polyline fill="none" stroke={STRATEGY_COLORS.DRL_dueling_ddqn} strokeWidth={1.4}
+                <polyline fill="none" stroke="#3b82f6" strokeWidth={1.4}
                   points={recState.curve.slice(0,step+1).map((v,i)=>`${24+i*(196/43)},${100-v*110}`).join(" ")}/>
                 {step>0&&<polygon opacity={0.08} fill="#3b82f6"
                   points={[...recState.curve.slice(0,step+1).map((v,i)=>`${24+i*(196/43)},${100-v*110}`),
@@ -636,31 +555,6 @@ export default function Dashboard(){
                   style={{fontSize:6,fill:"#93c5fd",fontFamily:"JetBrains Mono"}}>{recState.curve[step]?.toFixed(4)}</text>}
                 <text x={122} y={98} textAnchor="middle" style={{fontSize:5,fill:"#334155"}}>修复步 →</text>
               </svg>
-              {/* 策略图例 + 对比开关 */}
-              {scenario==="SSP585"?(
-                <div style={{display:"flex",flexWrap:"wrap",gap:"3px 9px",fontSize:9.5,marginTop:4,alignItems:"center"}}>
-                  <button onClick={()=>setShowAllStrategies(v=>!v)} style={{
-                    padding:"2px 6px",border:"1px solid rgba(255,255,255,0.1)",borderRadius:3,cursor:"pointer",
-                    fontFamily:"inherit",fontSize:9,fontWeight:600,
-                    background:showAllStrategies?"rgba(59,130,246,0.2)":"transparent",
-                    color:showAllStrategies?"#bfdbfe":"#64748b",
-                  }}>策略对比 {showAllStrategies?"✓":"×"}</button>
-                  {Object.entries(STRATEGY_LABELS).map(([k,l])=>{
-                    const isDRL=k==="DRL_dueling_ddqn";
-                    const active=isDRL||showAllStrategies;
-                    return(
-                      <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4,opacity:active?1:0.3}}>
-                        <span style={{display:"inline-block",width:14,borderTop:`${isDRL?"1.5px solid":"1px dashed"} ${STRATEGY_COLORS[k]}`}}/>
-                        <span style={{color:isDRL?"#bfdbfe":"#94a3b8"}}>{l}</span>
-                      </span>
-                    );
-                  })}
-                </div>
-              ):(
-                <div style={{fontSize:9.5,color:"#64748b",marginTop:4,fontStyle:"italic"}}>
-                  仅 SSP5-8.5 有完整策略对比数据;当前显示 DRL 单曲线
-                </div>
-              )}
             </div>
           )}
 
