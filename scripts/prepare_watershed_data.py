@@ -4,6 +4,7 @@ import json, sys, os, warnings
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import jenkspy
 warnings.filterwarnings('ignore')
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -15,12 +16,16 @@ OUT_DIR = r"E:\大论文数据处理\26年重新计算\Github_Platform\bth-resil
 print("[1/11] 计算汇水单元质心...")
 gdf = gpd.read_file(rf"{BASE}\流域划分\output\流域单元划分\BTH_watersheds_final.gpkg")
 gdf = gdf.sort_values("watershed_id").reset_index(drop=True)
-# UTM投影下算质心再转回WGS84
+# UTM投影下算质心;同时保留 WGS84 经纬度和 UTM 米制坐标
 c_utm = gdf.to_crs(32650).geometry.centroid
 c_wgs = gpd.GeoSeries(c_utm, crs=32650).to_crs(4326)
-gdf["x"] = c_wgs.x.values
-gdf["y"] = c_wgs.y.values
-print(f"   {len(gdf)} 个汇水单元, 经度范围 [{gdf['x'].min():.2f}, {gdf['x'].max():.2f}]")
+gdf["x"] = c_wgs.x.values        # WGS84 经度 (度)
+gdf["y"] = c_wgs.y.values        # WGS84 纬度 (度)
+gdf["xUtm"] = c_utm.x.values     # EPSG:32650 东坐标 (米)
+gdf["yUtm"] = c_utm.y.values     # EPSG:32650 北坐标 (米)
+print(f"   {len(gdf)} 个汇水单元, 经度 [{gdf['x'].min():.2f}, {gdf['x'].max():.2f}]")
+print(f"   UTM 东坐标 [{gdf['xUtm'].min():.0f}, {gdf['xUtm'].max():.0f}] m")
+print(f"   UTM 北坐标 [{gdf['yUtm'].min():.0f}, {gdf['yUtm'].max():.0f}] m")
 print(f"   watershed_id 范围: {gdf['watershed_id'].min()} - {gdf['watershed_id'].max()}")
 
 # ─── 2) 第四/五章综合基座表 ───
@@ -49,7 +54,7 @@ for c, i in city_idx_map.items():
 
 # ─── 5) 主表合并 ───
 print("[4/11] 合并主表...")
-df = gdf[["watershed_id", "main_city", "x", "y"]].copy()
+df = gdf[["watershed_id", "main_city", "x", "y", "xUtm", "yUtm"]].copy()
 
 res_cols_want = ["watershed_id","ECON_T_ws_norm","SOC_T_ws_norm","INFRA_T_ws_norm","ECO_T_ws_norm",
                  "NFR_norm","NRI_norm","H_score","E_score","S_score","A_score",
@@ -122,6 +127,8 @@ for _, r in df.iterrows():
         "cityIdx": safe_int(r.get("cityIdx")),
         "x": safe_float(r["x"]),
         "y": safe_float(r["y"]),
+        "xUtm": round(float(r["xUtm"]), 1),
+        "yUtm": round(float(r["yUtm"]), 1),
         "econR":  safe_float(r.get("ECON_T_ws_norm")),
         "socR":   safe_float(r.get("SOC_T_ws_norm")),
         "infraR": safe_float(r.get("INFRA_T_ws_norm")),
@@ -180,6 +187,31 @@ try:
 except Exception as e:
     print(f"   ⚠ NRI 读取失败: {e}")
 
+# ─── 9b) Jenks 5 分级断点(每个连续字段) ───
+print("[9a] 计算 Jenks 5 分级...")
+JENKS_FIELDS = [
+    "econR","socR","infraR","ecoR","nfr","nri",
+    "hazard","exposure","sensitivity","adaptability","riskScore","couplingDegree",
+    "aeld","damage","hubWeight","inundDepth","roadDamageRate",
+]
+jenks_breaks = {}
+for fld in JENKS_FIELDS:
+    vals = np.array([u[fld] for u in units], dtype=float)
+    vals = vals[~np.isnan(vals)]
+    vals = vals[vals > 0] if fld in ("roadDamageRate",) else vals  # 0 多时剔除再分
+    if len(vals) < 6:
+        continue
+    try:
+        brks = jenkspy.jenks_breaks(vals, n_classes=5)
+    except Exception as e:
+        print(f"   ⚠ {fld} Jenks 失败: {e}")
+        continue
+    jenks_breaks[fld] = [round(float(b), 4) for b in brks]
+    cts = [int(((vals >= brks[i]) & (vals <= brks[i+1])).sum()) if i == 4
+           else int(((vals >= brks[i]) & (vals < brks[i+1])).sum())
+           for i in range(5)]
+    print(f"   {fld:16s} → {jenks_breaks[fld]}  类计数 {cts}")
+
 # ─── 10) 输出JSON ───
 print("[9/11] 写入 JSON...")
 payload = {
@@ -195,6 +227,7 @@ payload = {
         "recoveryScenario": "SSP585",
         "bestVariant": "dueling_ddqn",
         "curveSteps": len(recovery_curve),
+        "jenksBreaks": jenks_breaks,
         "description": "京津冀城市群洪涝韧性全过程评估数据"
     }
 }

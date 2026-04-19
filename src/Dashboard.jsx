@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import * as d3 from "d3";
+import mapboxgl from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
+
+// Mapbox token:本地从 .env.local 读,线上从 GitHub Actions secret 注入(VITE_MAPBOX_TOKEN)
+mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
 
 // ─── Constants ───
 const QUADRANT_COLORS = { HH:"#ef4444", HL:"#f59e0b", LH:"#a78bfa", LL:"#34d399" };
@@ -9,13 +13,23 @@ const SUB_NAMES = ["经济韧性","社会韧性","基础设施韧性","生态韧
 const SUB_KEYS = ["econR","socR","infraR","ecoR"];
 const SUB_COLORS = ["#f87171","#60a5fa","#34d399","#fbbf24"];
 
-function lerp(a,b,t){ return a+(b-a)*Math.max(0,Math.min(1,t)); }
-function v2c(val,scheme){
-  const v=Math.max(0,Math.min(1,val));
-  if(scheme==="res"){
-    return `rgb(${Math.round(lerp(190,20,v))},${Math.round(lerp(60,170,v))},${Math.round(lerp(60,90,v))})`;
+// ── 5 级 Jenks 调色板（由原连续 lerp 在 t=0,0.25,0.5,0.75,1 采样得到） ──
+const PAL_RES  = ["#be3c3c","#945844","#69734b","#3f8f53","#14aa5a"]; // 低(红) → 高(绿)
+const PAL_RISK = ["#1e64a0","#505981","#824e62","#b44242","#e63723"]; // 低(蓝) → 高(红)
+
+function classify(v, brks){
+  if(!brks||brks.length<6||v==null||Number.isNaN(v))return 0;
+  for(let i=4;i>=0;i--){ if(v>=brks[i])return i; }
+  return 0;
+}
+function v2c(val, scheme, field, breaks){
+  const pal = scheme==="res"?PAL_RES:PAL_RISK;
+  if(field && breaks && breaks[field]){
+    return pal[classify(val, breaks[field])];
   }
-  return `rgb(${Math.round(lerp(30,230,v))},${Math.round(lerp(100,55,v))},${Math.round(lerp(160,35,v))})`;
+  // 回退:按 0-1 等分 5 段
+  const i = Math.min(4, Math.max(0, Math.floor((val||0)*5)));
+  return pal[i];
 }
 
 // ─── Main ───
@@ -32,7 +46,13 @@ export default function Dashboard(){
   const [step,setStep]=useState(0);
   const [playing,setPlaying]=useState(false);
   const [panelOpen,setPanelOpen]=useState(true);
+  const [mapReady,setMapReady]=useState(false);
+  const [mapError,setMapError]=useState(null);
   const timer=useRef(null);
+  const mapContainer=useRef(null);
+  const mapRef=useRef(null);
+  const geoRef=useRef(null);
+  const hovIdRef=useRef(null);
 
   // Load data
   useEffect(()=>{
@@ -49,7 +69,8 @@ export default function Dashboard(){
         while(rc.length<44)rc.push(rc[rc.length-1]||0.846);
         if(rc.length>44)rc=rc.slice(0,44);
         const aeldMax=Math.max(...units.map(u=>u.aeld));
-        setData({units,rc,gc:json.greedyCurve||[],cities:json.cities||[],meta:json.meta,aeldMax});
+        const jenks=json.meta?.jenksBreaks||{};
+        setData({units,rc,gc:json.greedyCurve||[],cities:json.cities||[],meta:json.meta,aeldMax,jenks});
         setLoading(false);
       })
       .catch(e=>{setError(e.message);setLoading(false);});
@@ -61,17 +82,6 @@ export default function Dashboard(){
     return ()=>clearInterval(timer.current);
   },[playing]);
 
-  // Voronoi computation
-  const voronoi=useMemo(()=>{
-    if(!data)return null;
-    const pts=data.units.map(u=>[u.x,-u.y]);
-    const pad=0.4;
-    const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
-    const bounds=[Math.min(...xs)-pad,Math.min(...ys)-pad,Math.max(...xs)+pad,Math.max(...ys)+pad];
-    const delaunay=d3.Delaunay.from(pts);
-    const vor=delaunay.voronoi(bounds);
-    return {vor,bounds};
-  },[data]);
 
   // Recovery state
   const recState=useMemo(()=>{
@@ -88,29 +98,155 @@ export default function Dashboard(){
     return{repaired:cur,batch,curve:data.rc};
   },[step,data]);
 
-  // Color
+  // Color (Jenks 5-class)
   const getColor=useCallback((u)=>{
     if(!data)return"#333";
+    const jb=data.jenks;
     if(ch===4){
       if(layer4==="weakest")return SUB_COLORS[u.weakest]||"#555";
-      return v2c(u[layer4]||0,"res");
+      return v2c(u[layer4]||0,"res",layer4,jb);
     }
     if(ch===5){
       if(layer5==="quadrant")return QUADRANT_COLORS[u.quadrant]||"#555";
-      return v2c(u[layer5]||0,"risk");
+      return v2c(u[layer5]||0,"risk",layer5,jb);
     }
     if(ch===6){
       if(layer6==="phase")return PHASE_COLORS[u.repairPhase]||"#555";
       if(layer6==="recovery"){
         if(recState.batch.includes(u.id))return"#fbbf24";
         if(recState.repaired.has(u.id))return"#22c55e";
-        return v2c(u.damage/0.6,"risk");
+        return v2c(u.damage,"risk","damage",jb);
       }
-      if(layer6==="aeld")return v2c(u.aeld/(data.aeldMax||103),"risk");
-      if(layer6==="damage")return v2c(u.damage/0.6,"risk");
+      if(layer6==="aeld")  return v2c(u.aeld,"risk","aeld",jb);
+      if(layer6==="damage")return v2c(u.damage,"risk","damage",jb);
     }
     return"#555";
   },[ch,layer4,layer5,layer6,recState,data]);
+
+  // ── Mapbox init(data 就绪时只建一次) ──
+  useEffect(()=>{
+    if(!data||mapRef.current||!mapContainer.current)return;
+    if(!mapboxgl.accessToken){ setMapError("缺少 Mapbox token"); return; }
+    let map;
+    try{
+      map=new mapboxgl.Map({
+        container:mapContainer.current,
+        style:"mapbox://styles/mapbox/dark-v11",
+        center:[116.3,39.6],
+        zoom:5.9,
+        minZoom:4,
+        maxZoom:11,
+        attributionControl:false,
+      });
+    }catch(e){ setMapError(String(e.message||e)); return; }
+    mapRef.current=map;
+    map.on("error",(e)=>{ if(e?.error?.status===401)setMapError("Mapbox token 无效(401)"); });
+
+    map.on("load",async ()=>{
+      try{
+        const geo=await fetch(import.meta.env.BASE_URL+"watersheds.geojson").then(r=>{
+          if(!r.ok)throw new Error("HTTP "+r.status);
+          return r.json();
+        });
+        // 初始颜色注入 feature.properties._color
+        geo.features.forEach(f=>{
+          const u=data.units.find(x=>x.wsId===f.properties.id);
+          f.properties._color=u?"#666":"#444"; // 占位,稍后刷新
+        });
+        geoRef.current=geo;
+        map.addSource("ws",{type:"geojson",data:geo,promoteId:"id"});
+
+        map.addLayer({
+          id:"ws-fill",type:"fill",source:"ws",
+          paint:{
+            "fill-color":["get","_color"],
+            "fill-opacity":[
+              "case",
+              ["boolean",["feature-state","selected"],false],0.92,
+              ["boolean",["feature-state","hover"],false],0.82,
+              0.62,
+            ],
+          },
+        });
+        map.addLayer({
+          id:"ws-line",type:"line",source:"ws",
+          paint:{
+            "line-color":[
+              "case",
+              ["boolean",["feature-state","selected"],false],"#ffffff",
+              ["boolean",["feature-state","hover"],false],"rgba(255,255,255,0.65)",
+              "rgba(255,255,255,0.22)",
+            ],
+            "line-width":[
+              "case",
+              ["boolean",["feature-state","selected"],false],2.2,
+              ["boolean",["feature-state","hover"],false],1.4,
+              0.5,
+            ],
+          },
+        });
+
+        // 城市质心 -> 标签符号层(用 HTML overlay 以避开 Mapbox CJK 字形依赖)
+        // 下面 mousemove/leave/click 均以 promoteId=id 对应的 feature.id 为主键(= wsId 1-129)
+        map.on("mousemove","ws-fill",(e)=>{
+          if(!e.features?.length)return;
+          const f=e.features[0];
+          if(hovIdRef.current!==null&&hovIdRef.current!==f.id){
+            map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
+          }
+          hovIdRef.current=f.id;
+          map.setFeatureState({source:"ws",id:f.id},{hover:true});
+          map.getCanvas().style.cursor="pointer";
+          setHov(f.properties.id-1); // wsId→id 0-based
+        });
+        map.on("mouseleave","ws-fill",()=>{
+          if(hovIdRef.current!==null){
+            map.setFeatureState({source:"ws",id:hovIdRef.current},{hover:false});
+            hovIdRef.current=null;
+          }
+          map.getCanvas().style.cursor="";
+          setHov(null);
+        });
+        map.on("click","ws-fill",(e)=>{
+          if(!e.features?.length)return;
+          const idZero=e.features[0].properties.id-1;
+          setSel(prev=>prev===idZero?null:idZero);
+        });
+
+        setMapReady(true);
+      }catch(err){
+        setMapError(String(err.message||err));
+      }
+    });
+
+    return()=>{ map.remove(); mapRef.current=null; setMapReady(false); };
+  },[data]);
+
+  // ── 颜色刷新:图层/步骤改变时重算每个 feature._color 并 setData ──
+  useEffect(()=>{
+    const map=mapRef.current;
+    const geo=geoRef.current;
+    if(!map||!mapReady||!data||!geo)return;
+    const src=map.getSource("ws");
+    if(!src)return;
+    geo.features.forEach(f=>{
+      const u=data.units.find(x=>x.wsId===f.properties.id);
+      f.properties._color=u?getColor(u):"#444";
+    });
+    src.setData(geo);
+  },[getColor,data,mapReady]);
+
+  // ── 选中同步:sel 变化时更新 feature-state.selected ──
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!mapReady||!data)return;
+    data.units.forEach(u=>{
+      map.setFeatureState({source:"ws",id:u.wsId},{selected:false});
+    });
+    if(sel!=null&&data.units[sel]){
+      map.setFeatureState({source:"ws",id:data.units[sel].wsId},{selected:true});
+    }
+  },[sel,data,mapReady]);
 
   if(loading)return(
     <div style={{width:"100%",height:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",
@@ -131,8 +267,6 @@ export default function Dashboard(){
 
   const U=data.units;
   const disp=hov!==null?U.find(u=>u.id===hov):sel!==null?U.find(u=>u.id===sel):null;
-  const [bx,by,bw0,bh0]=voronoi?voronoi.bounds:[113,-43,7,7];
-  const bw=bw0-bx, bh=bh0-by;
   const cityGroups={};
   U.forEach(u=>{if(!cityGroups[u.cityName])cityGroups[u.cityName]=[];cityGroups[u.cityName].push(u);});
 
@@ -150,29 +284,29 @@ export default function Dashboard(){
         display:"flex",alignItems:"center",gap:12,flexShrink:0,
         backdropFilter:"blur(16px)",zIndex:10,flexWrap:"wrap",
       }}>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginRight:8}}>
-          <div style={{width:7,height:7,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 8px #22c55e"}}/>
-          <span style={{fontSize:14,fontWeight:700,letterSpacing:0.5,whiteSpace:"nowrap"}}>京津冀洪涝韧性仪表盘</span>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginRight:8}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 8px #22c55e"}}/>
+          <span style={{fontSize:16,fontWeight:700,letterSpacing:0.5,whiteSpace:"nowrap"}}>京津冀洪涝韧性仪表盘</span>
         </div>
-        <div style={{display:"flex",gap:2}}>
+        <div style={{display:"flex",gap:3}}>
           {[{c:4,l:"灾前韧性"},{c:5,l:"风险耦合"},{c:6,l:"恢复优化"}].map(({c,l})=>(
             <button key={c} onClick={()=>{setCh(c);setStep(0);setPlaying(false);}} style={{
-              padding:"5px 12px",border:"none",cursor:"pointer",borderRadius:4,fontSize:11,fontWeight:500,
+              padding:"6px 14px",border:"none",cursor:"pointer",borderRadius:5,fontSize:13,fontWeight:500,
               fontFamily:"inherit",transition:"all 0.15s",
               background:ch===c?"rgba(59,130,246,0.2)":"transparent",
-              color:ch===c?"#93c5fd":"#64748b",
+              color:ch===c?"#93c5fd":"#94a3b8",
               outline:ch===c?"1px solid rgba(59,130,246,0.3)":"1px solid transparent",
             }}>Ch{c} {l}</button>
           ))}
         </div>
-        <div style={{display:"flex",gap:3,alignItems:"center",marginLeft:"auto"}}>
+        <div style={{display:"flex",gap:4,alignItems:"center",marginLeft:"auto"}}>
           {["D","P","S","I","R"].map((d,i)=>(
             <span key={i} style={{
-              fontSize:9,padding:"2px 5px",borderRadius:3,fontWeight:600,letterSpacing:0.5,
+              fontSize:11,padding:"3px 7px",borderRadius:3,fontWeight:600,letterSpacing:0.5,
               background:(ch===4&&i===2)||(ch===5&&(i===1||i===3))||(ch===6&&i===4)
                 ?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.04)",
               color:(ch===4&&i===2)||(ch===5&&(i===1||i===3))||(ch===6&&i===4)
-                ?"#93c5fd":"#475569",
+                ?"#93c5fd":"#64748b",
             }}>{d}</span>
           ))}
         </div>
@@ -183,17 +317,17 @@ export default function Dashboard(){
 
         {/* ─── LEFT SIDEBAR ─── */}
         <div style={{
-          width:170,minWidth:170,padding:"12px 10px",
+          width:210,minWidth:210,padding:"14px 12px",
           background:"rgba(8,12,20,0.7)",borderRight:"1px solid rgba(255,255,255,0.04)",
-          display:"flex",flexDirection:"column",gap:8,overflowY:"auto",flexShrink:0,
+          display:"flex",flexDirection:"column",gap:10,overflowY:"auto",flexShrink:0,
         }}>
-          <div style={{fontSize:9,color:"#475569",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase"}}>图层</div>
+          <div style={{fontSize:11,color:"#64748b",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase"}}>图层</div>
           {ch===4&&<>
             <LG label="韧性" opts={[
               {k:"nfr",l:"综合NFR"},{k:"econR",l:"经济"},{k:"socR",l:"社会"},
               {k:"infraR",l:"基础设施"},{k:"ecoR",l:"生态"},{k:"weakest",l:"最弱子系统"},
             ]} v={layer4} set={setLayer4}/>
-            {layer4!=="weakest"?<CB s="res"/>:
+            {layer4!=="weakest"?<CB s="res" field={layer4} breaks={data.jenks}/>:
               <Legnd items={SUB_NAMES.map((n,i)=>({c:SUB_COLORS[i],l:n}))}/>}
           </>}
           {ch===5&&<>
@@ -201,7 +335,7 @@ export default function Dashboard(){
               {k:"riskScore",l:"综合风险"},{k:"hazard",l:"H 危险性"},{k:"exposure",l:"E 暴露性"},
               {k:"sensitivity",l:"S 敏感性"},{k:"adaptability",l:"A 适应性"},{k:"quadrant",l:"四象限"},
             ]} v={layer5} set={setLayer5}/>
-            {layer5!=="quadrant"?<CB s="risk"/>:
+            {layer5!=="quadrant"?<CB s="risk" field={layer5} breaks={data.jenks}/>:
               <Legnd items={Object.entries(QUADRANT_LABELS).map(([k,v])=>({c:QUADRANT_COLORS[k],l:`${k} ${v}`}))}/>}
           </>}
           {ch===6&&<>
@@ -212,95 +346,54 @@ export default function Dashboard(){
             {layer6==="recovery"&&<Legnd items={[
               {c:"#fbbf24",l:"当前修复",g:true},{c:"#22c55e",l:"已修复"},{c:"#7f1d1d",l:"未修复"}]}/>}
             {layer6==="phase"&&<Legnd items={Object.entries(PHASE_COLORS).map(([k,v])=>({c:v,l:k}))}/>}
-            {(layer6==="aeld"||layer6==="damage")&&<CB s="risk"/>}
+            {(layer6==="aeld"||layer6==="damage")&&<CB s="risk" field={layer6} breaks={data.jenks}/>}
           </>}
-          <div style={{marginTop:"auto",paddingTop:8,borderTop:"1px solid rgba(255,255,255,0.04)",fontSize:9,color:"#334155",lineHeight:1.6}}>
-            {data.meta.totalUnits} 汇水单元<br/>{data.meta.totalCities} 城市 · WGS84
+          <div style={{marginTop:"auto",paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)",fontSize:11,color:"#475569",lineHeight:1.6}}>
+            {data.meta.totalUnits} 汇水单元<br/>{data.meta.totalCities} 城市 · Mapbox 底图<br/>
+            <span style={{fontSize:10,color:"#334155"}}>Jenks · 5 分级</span>
           </div>
         </div>
 
         {/* ─── MAP ─── */}
         <div style={{flex:1,position:"relative",overflow:"hidden",background:"#0a0e17",minWidth:0}}>
-          <svg viewBox={`${bx} ${by} ${bw} ${bh}`}
-            preserveAspectRatio="xMidYMid meet"
-            style={{width:"100%",height:"100%",display:"block"}}>
-            <defs>
-              <filter id="glow"><feGaussianBlur stdDeviation="0.03" result="b"/>
-                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
-            </defs>
+          {/* Mapbox 容器 */}
+          <div ref={mapContainer} style={{position:"absolute",inset:0}}/>
 
-            {/* Voronoi cells */}
-            {voronoi && U.map((u,i)=>{
-              const cell=voronoi.vor.cellPolygon(i);
-              if(!cell)return null;
-              const color=getColor(u);
-              const isSel=sel===u.id;
-              const isHov=hov===u.id;
-              const isBatch=ch===6&&layer6==="recovery"&&recState.batch.includes(u.id);
-              const d="M"+cell.map(p=>p.join(",")).join("L")+"Z";
-              return(
-                <g key={u.id}>
-                  <path d={d} fill={color} fillOpacity={isBatch?0.92:isSel?0.88:isHov?0.82:0.65}
-                    stroke={isSel?"#fff":isHov?"rgba(255,255,255,0.5)":"rgba(0,0,0,0.4)"}
-                    strokeWidth={isSel?0.025:isHov?0.015:0.008}
-                    style={{cursor:"pointer",transition:"fill-opacity 0.15s, fill 0.25s"}}
-                    onClick={()=>setSel(u.id===sel?null:u.id)}
-                    onMouseEnter={()=>setHov(u.id)}
-                    onMouseLeave={()=>setHov(null)}
-                  />
-                  <circle cx={u.x} cy={-u.y} r={isBatch?0.055:0.02}
-                    fill={isBatch?"#fff":"rgba(255,255,255,0.25)"} style={{pointerEvents:"none"}}/>
-                  {isBatch&&<circle cx={u.x} cy={-u.y} r={0.1} fill="none"
-                    stroke="#fbbf24" strokeWidth={0.012} opacity={0.6} filter="url(#glow)">
-                    <animate attributeName="r" values="0.06;0.14;0.06" dur="1s" repeatCount="indefinite"/>
-                    <animate attributeName="opacity" values="0.7;0.1;0.7" dur="1s" repeatCount="indefinite"/>
-                  </circle>}
-                  {isBatch&&<text x={u.x} y={-u.y+0.025} textAnchor="middle"
-                    style={{fontSize:0.055,fill:"#000",fontWeight:700,fontFamily:"JetBrains Mono",pointerEvents:"none"}}>
-                    {u.repairOrder+1}
-                  </text>}
-                </g>
-              );
-            })}
+          {/* 底图加载失败提示 */}
+          {mapError&&(
+            <div style={{position:"absolute",top:42,left:14,padding:"4px 9px",borderRadius:4,
+              background:"rgba(127,29,29,0.7)",color:"#fecaca",fontSize:11,pointerEvents:"none",
+              border:"1px solid rgba(239,68,68,0.35)"}}>
+              底图不可用:{mapError}(仍可查看汇水单元)
+            </div>
+          )}
 
-            {/* City labels */}
-            {Object.entries(cityGroups).map(([name,units])=>{
-              const cx=units.reduce((s,u)=>s+u.x,0)/units.length;
-              const cy=units.reduce((s,u)=>s+u.y,0)/units.length;
-              return(
-                <text key={name} x={cx} y={-cy} textAnchor="middle" dominantBaseline="middle"
-                  style={{fontSize:0.14,fill:"rgba(255,255,255,0.22)",fontWeight:700,
-                    fontFamily:"'Noto Sans SC'",pointerEvents:"none",letterSpacing:0.02}}>
-                  {name}
-                </text>
-              );
-            })}
-          </svg>
+          {/* 城市名 HTML 叠加(Mapbox 原生文字缺 CJK 字形,改用 DOM 覆盖) */}
+          <CityLabels map={mapRef.current} ready={mapReady} cityGroups={cityGroups}/>
 
           {/* Chapter overlay */}
-          <div style={{position:"absolute",top:10,left:12,fontSize:12,fontWeight:600,color:"rgba(148,163,184,0.6)",pointerEvents:"none"}}>
+          <div style={{position:"absolute",top:12,left:14,fontSize:15,fontWeight:600,color:"rgba(148,163,184,0.72)",pointerEvents:"none",letterSpacing:0.5}}>
             {ch===4&&"第四章 · 灾前韧性基线"}{ch===5&&"第五章 · 洪涝风险时空格局"}{ch===6&&"第六章 · 灾后协同恢复优化"}
           </div>
 
           {/* Recovery controls */}
           {ch===6&&layer6==="recovery"&&(
             <div style={{
-              position:"absolute",bottom:12,left:"50%",transform:"translateX(-50%)",
-              display:"flex",alignItems:"center",gap:8,
-              background:"rgba(8,12,20,0.92)",padding:"6px 14px",
-              borderRadius:8,border:"1px solid rgba(255,255,255,0.06)",backdropFilter:"blur(12px)",
+              position:"absolute",bottom:14,left:"50%",transform:"translateX(-50%)",
+              display:"flex",alignItems:"center",gap:10,
+              background:"rgba(8,12,20,0.92)",padding:"8px 18px",
+              borderRadius:10,border:"1px solid rgba(255,255,255,0.08)",backdropFilter:"blur(12px)",
             }}>
               <MBtn onClick={()=>{setStep(0);setPlaying(false);}}>⏮</MBtn>
               <MBtn onClick={()=>setPlaying(!playing)}>{playing?"⏸":"▶"}</MBtn>
               <MBtn onClick={()=>setStep(s=>Math.min(s+1,43))}>⏭</MBtn>
               <input type="range" min={0} max={43} value={step}
                 onChange={e=>{setStep(+e.target.value);setPlaying(false);}}
-                style={{width:140,accentColor:"#3b82f6"}}/>
-              <span style={{fontSize:11,fontFamily:"JetBrains Mono",color:"#93c5fd",minWidth:55}}>
+                style={{width:160,accentColor:"#3b82f6"}}/>
+              <span style={{fontSize:13,fontFamily:"JetBrains Mono",color:"#93c5fd",minWidth:60,fontWeight:600}}>
                 {step}/43
               </span>
-              <span style={{fontSize:10,color:"#475569"}}>{recState.repaired.size}/129</span>
+              <span style={{fontSize:12,color:"#64748b"}}>{recState.repaired.size}/129</span>
             </div>
           )}
 
@@ -308,10 +401,10 @@ export default function Dashboard(){
           {ch===6&&(
             <div style={{
               position:"absolute",bottom:layer6==="recovery"?56:12,right:12,
-              width:240,height:130,background:"rgba(8,12,20,0.92)",padding:"8px 10px",
-              borderRadius:8,border:"1px solid rgba(255,255,255,0.06)",
+              width:280,height:150,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
+              borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",
             }}>
-              <div style={{fontSize:9,color:"#475569",marginBottom:3,fontWeight:600}}>F(t) · {data.meta.recoveryScenario}</div>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:4,fontWeight:600,letterSpacing:0.5}}>F(t) · {data.meta.recoveryScenario}</div>
               <svg viewBox="0 0 220 100" style={{width:"100%",height:95}}>
                 {[0.5,0.6,0.7,0.8].map(v=>(
                   <g key={v}>
@@ -342,29 +435,29 @@ export default function Dashboard(){
 
           {/* Stats */}
           {ch===4&&(
-            <div style={{position:"absolute",bottom:12,right:12,display:"flex",flexDirection:"column",gap:4}}>
+            <div style={{position:"absolute",bottom:14,right:14,display:"flex",flexDirection:"column",gap:5}}>
               {SUB_NAMES.map((n,i)=>{
                 const avg=U.reduce((s,u)=>s+u[SUB_KEYS[i]],0)/U.length;
                 const wk=U.filter(u=>u.weakest===i).length;
-                return(<div key={i} style={{display:"flex",alignItems:"center",gap:6,
-                  background:"rgba(8,12,20,0.88)",padding:"4px 10px",borderRadius:5,borderLeft:`3px solid ${SUB_COLORS[i]}`}}>
-                  <span style={{fontSize:9,color:"#94a3b8",width:70}}>{n}</span>
-                  <span style={{fontSize:11,fontFamily:"JetBrains Mono",color:"#e2e8f0",fontWeight:600,width:42}}>{avg.toFixed(3)}</span>
-                  <span style={{fontSize:8,color:"#475569"}}>弱:{wk}</span>
+                return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,
+                  background:"rgba(8,12,20,0.9)",padding:"6px 12px",borderRadius:6,borderLeft:`4px solid ${SUB_COLORS[i]}`}}>
+                  <span style={{fontSize:12,color:"#cbd5e1",width:84}}>{n}</span>
+                  <span style={{fontSize:13,fontFamily:"JetBrains Mono",color:"#e2e8f0",fontWeight:600,width:48}}>{avg.toFixed(3)}</span>
+                  <span style={{fontSize:11,color:"#64748b"}}>弱:{wk}</span>
                 </div>);
               })}
             </div>
           )}
           {ch===5&&layer5==="quadrant"&&(
-            <div style={{position:"absolute",bottom:12,right:12,background:"rgba(8,12,20,0.92)",padding:10,borderRadius:8}}>
-              <div style={{fontSize:9,color:"#475569",marginBottom:4,fontWeight:600}}>四象限分布</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:3}}>
+            <div style={{position:"absolute",bottom:14,right:14,background:"rgba(8,12,20,0.92)",padding:12,borderRadius:8,border:"1px solid rgba(255,255,255,0.06)"}}>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:6,fontWeight:600,letterSpacing:0.5}}>四象限分布</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
                 {Object.entries(QUADRANT_LABELS).map(([k,v])=>(
-                  <div key={k} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 6px",borderRadius:3,
+                  <div key={k} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",borderRadius:4,
                     background:`${QUADRANT_COLORS[k]}12`}}>
-                    <div style={{width:7,height:7,borderRadius:2,background:QUADRANT_COLORS[k]}}/>
-                    <span style={{fontSize:9,color:"#cbd5e1"}}>{v}</span>
-                    <span style={{fontSize:10,fontFamily:"JetBrains Mono",color:QUADRANT_COLORS[k],fontWeight:700,marginLeft:"auto"}}>
+                    <div style={{width:9,height:9,borderRadius:2,background:QUADRANT_COLORS[k]}}/>
+                    <span style={{fontSize:11,color:"#cbd5e1"}}>{v}</span>
+                    <span style={{fontSize:12,fontFamily:"JetBrains Mono",color:QUADRANT_COLORS[k],fontWeight:700,marginLeft:"auto"}}>
                       {U.filter(u=>u.quadrant===k).length}
                     </span>
                   </div>
@@ -376,18 +469,18 @@ export default function Dashboard(){
 
         {/* ─── RIGHT PANEL ─── */}
         <div style={{
-          width:panelOpen?230:0,minWidth:panelOpen?230:0,
+          width:panelOpen?280:0,minWidth:panelOpen?280:0,
           transition:"width 0.2s ease,min-width 0.2s ease",overflow:"hidden",
           background:"rgba(8,12,20,0.7)",borderLeft:"1px solid rgba(255,255,255,0.04)",flexShrink:0,
         }}>
-          <div style={{width:230,padding:"12px 10px",overflowY:"auto",height:"100%",boxSizing:"border-box"}}>
+          <div style={{width:280,padding:"14px 12px",overflowY:"auto",height:"100%",boxSizing:"border-box"}}>
             {disp?(
               <>
-                <div style={{fontSize:9,color:"#475569",fontWeight:600,letterSpacing:1,marginBottom:6}}>汇水单元详情</div>
-                <div style={{padding:"7px 9px",borderRadius:5,marginBottom:8,
+                <div style={{fontSize:11,color:"#64748b",fontWeight:600,letterSpacing:1,marginBottom:8}}>汇水单元详情</div>
+                <div style={{padding:"9px 11px",borderRadius:6,marginBottom:10,
                   background:"rgba(30,41,59,0.6)",border:"1px solid rgba(255,255,255,0.04)"}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>{disp.cityName} · WS-{String(disp.wsId).padStart(3,"0")}</div>
-                  <div style={{fontSize:9,color:"#475569",marginTop:1}}>{disp.x.toFixed(2)}°E, {disp.y.toFixed(2)}°N</div>
+                  <div style={{fontSize:15,fontWeight:700,color:"#e2e8f0"}}>{disp.cityName} · WS-{String(disp.wsId).padStart(3,"0")}</div>
+                  <div style={{fontSize:11,color:"#64748b",marginTop:2}}>{disp.x.toFixed(2)}°E, {disp.y.toFixed(2)}°N</div>
                 </div>
                 <Sec t="第四章 · 韧性基线" c="#3b82f6">
                   <Bar l="综合NFR" v={disp.nfr} c="#3b82f6"/>
@@ -400,21 +493,21 @@ export default function Dashboard(){
                   <Bar l="E 暴露性" v={disp.exposure} c="#f97316"/>
                   <Bar l="S 敏感性" v={disp.sensitivity} c="#eab308"/>
                   <Bar l="A 适应性" v={disp.adaptability} c="#22c55e"/>
-                  <div style={{display:"flex",alignItems:"center",gap:5,marginTop:3,padding:"3px 6px",borderRadius:3,
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:5,padding:"4px 8px",borderRadius:4,
                     background:`${QUADRANT_COLORS[disp.quadrant]}15`}}>
-                    <div style={{width:7,height:7,borderRadius:2,background:QUADRANT_COLORS[disp.quadrant]}}/>
-                    <span style={{fontSize:9,color:"#cbd5e1"}}>{disp.quadrant} {QUADRANT_LABELS[disp.quadrant]}</span>
-                    <span style={{fontSize:8,color:"#475569",marginLeft:"auto"}}>CCD={disp.couplingDegree?.toFixed(3)}</span>
+                    <div style={{width:9,height:9,borderRadius:2,background:QUADRANT_COLORS[disp.quadrant]}}/>
+                    <span style={{fontSize:11,color:"#cbd5e1"}}>{disp.quadrant} {QUADRANT_LABELS[disp.quadrant]}</span>
+                    <span style={{fontSize:10,color:"#475569",marginLeft:"auto"}}>CCD={disp.couplingDegree?.toFixed(3)}</span>
                   </div>
                 </Sec>
                 <Sec t="第六章 · 恢复优化" c="#22c55e">
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:3}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
                     <span style={{color:"#94a3b8"}}>修复序号</span>
                     <span style={{fontFamily:"JetBrains Mono",color:"#e2e8f0",fontWeight:600}}>#{disp.repairOrder+1}/129</span>
                   </div>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:3}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
                     <span style={{color:"#94a3b8"}}>阶段</span>
-                    <span style={{padding:"1px 5px",borderRadius:3,fontSize:8,fontWeight:600,
+                    <span style={{padding:"2px 7px",borderRadius:3,fontSize:10,fontWeight:600,
                       background:`${PHASE_COLORS[disp.repairPhase]}20`,color:PHASE_COLORS[disp.repairPhase]}}>
                       {disp.repairPhase}</span>
                   </div>
@@ -424,8 +517,8 @@ export default function Dashboard(){
                   <Bar l="淹没(m)" v={disp.inundDepth/1.5} c="#0ea5e9" dv={disp.inundDepth?.toFixed(3)}/>
                 </Sec>
                 {/* Radar */}
-                <div style={{marginTop:8}}>
-                  <div style={{fontSize:9,color:"#475569",fontWeight:600,marginBottom:4}}>四维韧性雷达</div>
+                <div style={{marginTop:10}}>
+                  <div style={{fontSize:11,color:"#64748b",fontWeight:600,marginBottom:6}}>四维韧性雷达</div>
                   <svg viewBox="0 0 120 120" style={{width:"100%"}}>
                     {[0.25,0.5,0.75,1].map(r=>(
                       <polygon key={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={0.5}
@@ -446,8 +539,8 @@ export default function Dashboard(){
               </>
             ):(
               <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",
-                flexDirection:"column",gap:6,color:"#334155",fontSize:10}}>
-                <div style={{fontSize:22,opacity:0.2}}>◎</div><div>点击单元查看详情</div>
+                flexDirection:"column",gap:8,color:"#475569",fontSize:12}}>
+                <div style={{fontSize:28,opacity:0.2}}>◎</div><div>点击单元查看详情</div>
               </div>
             )}
           </div>
@@ -455,9 +548,9 @@ export default function Dashboard(){
 
         {/* Panel toggle */}
         <button onClick={()=>setPanelOpen(!panelOpen)} style={{
-          position:"absolute",right:panelOpen?231:1,top:"50%",transform:"translateY(-50%)",
-          zIndex:5,width:16,height:36,border:"none",borderRadius:panelOpen?"4px 0 0 4px":"0 4px 4px 0",
-          background:"rgba(30,41,59,0.85)",color:"#64748b",cursor:"pointer",fontSize:9,
+          position:"absolute",right:panelOpen?281:1,top:"50%",transform:"translateY(-50%)",
+          zIndex:5,width:18,height:44,border:"none",borderRadius:panelOpen?"5px 0 0 5px":"0 5px 5px 0",
+          background:"rgba(30,41,59,0.85)",color:"#94a3b8",cursor:"pointer",fontSize:12,
           display:"flex",alignItems:"center",justifyContent:"center",transition:"right 0.2s",
         }}>{panelOpen?"›":"‹"}</button>
       </div>
@@ -466,58 +559,100 @@ export default function Dashboard(){
 }
 
 // ─── Sub-components ───
+// 城市名 HTML 叠加层:根据 Mapbox 相机位置将 WGS84 坐标投到屏幕像素
+function CityLabels({map,ready,cityGroups}){
+  const [, force] = useState(0);
+  useEffect(()=>{
+    if(!map||!ready)return;
+    const upd = ()=>force(v=>v+1);
+    map.on("move",upd);
+    map.on("zoom",upd);
+    upd();
+    return ()=>{ map.off("move",upd); map.off("zoom",upd); };
+  },[map,ready]);
+  if(!map||!ready)return null;
+  return (
+    <div style={{position:"absolute",inset:0,pointerEvents:"none",zIndex:2}}>
+      {Object.entries(cityGroups).map(([name,units])=>{
+        const lng = units.reduce((s,u)=>s+u.x,0)/units.length;
+        const lat = units.reduce((s,u)=>s+u.y,0)/units.length;
+        const p = map.project([lng,lat]);
+        return(
+          <div key={name} style={{
+            position:"absolute",left:p.x,top:p.y,transform:"translate(-50%,-50%)",
+            fontSize:15,fontWeight:700,color:"rgba(255,255,255,0.35)",letterSpacing:1,
+            textShadow:"0 0 6px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.9)",
+            fontFamily:"'Noto Sans SC',sans-serif",whiteSpace:"nowrap",
+          }}>{name}</div>
+        );
+      })}
+    </div>
+  );
+}
+
 function LG({label,opts,v,set}){
   return(<div>
-    <div style={{fontSize:9,color:"#64748b",fontWeight:500,marginBottom:3}}>{label}</div>
-    <div style={{display:"flex",flexDirection:"column",gap:1}}>
+    <div style={{fontSize:11,color:"#7a8599",fontWeight:500,marginBottom:4}}>{label}</div>
+    <div style={{display:"flex",flexDirection:"column",gap:2}}>
       {opts.map(o=>(<button key={o.k} onClick={()=>set(o.k)} style={{
-        padding:"3px 7px",border:"none",cursor:"pointer",borderRadius:3,fontSize:9.5,textAlign:"left",
+        padding:"5px 10px",border:"none",cursor:"pointer",borderRadius:4,fontSize:12,textAlign:"left",
         fontFamily:"inherit",transition:"all 0.12s",
         background:v===o.k?"rgba(59,130,246,0.18)":"transparent",
-        color:v===o.k?"#93c5fd":"#535d6e",
+        color:v===o.k?"#93c5fd":"#94a3b8",
       }}>{o.l}</button>))}
     </div>
   </div>);
 }
-function CB({s}){
-  const g=s==="res"?"linear-gradient(to right,rgb(190,60,60),rgb(100,115,75),rgb(20,170,90))"
-    :"linear-gradient(to right,rgb(30,100,160),rgb(130,78,98),rgb(230,55,35))";
-  return(<div style={{marginTop:4}}>
-    <div style={{height:5,borderRadius:3,background:g}}/>
-    <div style={{display:"flex",justifyContent:"space-between",fontSize:8,color:"#334155",marginTop:1}}>
-      <span>低</span><span>高</span>
+// 5 级 Jenks 图例:显示 5 个离散色块,可选展示分级阈值
+function CB({s,field,breaks}){
+  const pal = s==="res"?["#be3c3c","#945844","#69734b","#3f8f53","#14aa5a"]
+                       :["#1e64a0","#505981","#824e62","#b44242","#e63723"];
+  const brks = field && breaks ? breaks[field] : null;
+  return(<div style={{marginTop:6}}>
+    <div style={{display:"flex",height:10,borderRadius:3,overflow:"hidden"}}>
+      {pal.map((c,i)=>(<div key={i} style={{flex:1,background:c}}/>))}
     </div>
+    {brks && brks.length===6 ? (
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#475569",marginTop:3,fontFamily:"JetBrains Mono"}}>
+        {brks.map((b,i)=>(<span key={i}>{b>=100?b.toFixed(0):b.toFixed(2)}</span>))}
+      </div>
+    ) : (
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#475569",marginTop:3}}>
+        <span>低</span><span>高</span>
+      </div>
+    )}
+    <div style={{fontSize:9,color:"#334155",marginTop:2}}>Jenks · 5 分级</div>
   </div>);
 }
 function Legnd({items}){
-  return(<div style={{fontSize:9,display:"flex",flexDirection:"column",gap:2,marginTop:3}}>
-    {items.map((it,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:5}}>
-      <div style={{width:8,height:8,borderRadius:it.g?"50%":2,background:it.c,
-        boxShadow:it.g?`0 0 5px ${it.c}`:"none"}}/>
-      <span style={{color:"#7a8599"}}>{it.l}</span>
+  return(<div style={{fontSize:11,display:"flex",flexDirection:"column",gap:4,marginTop:4}}>
+    {items.map((it,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:7}}>
+      <div style={{width:10,height:10,borderRadius:it.g?"50%":2,background:it.c,
+        boxShadow:it.g?`0 0 6px ${it.c}`:"none"}}/>
+      <span style={{color:"#94a3b8"}}>{it.l}</span>
     </div>))}
   </div>);
 }
 function Sec({t,c,children}){
-  return(<div style={{marginBottom:8}}>
-    <div style={{fontSize:9,fontWeight:600,color:c,marginBottom:4,paddingBottom:3,borderBottom:`1px solid ${c}25`}}>{t}</div>
+  return(<div style={{marginBottom:10}}>
+    <div style={{fontSize:12,fontWeight:600,color:c,marginBottom:6,paddingBottom:4,borderBottom:`1px solid ${c}25`,letterSpacing:0.3}}>{t}</div>
     {children}
   </div>);
 }
 function Bar({l,v,c,w,dv}){
-  return(<div style={{marginBottom:2}}>
-    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:1}}>
-      <span style={{color:w?"#ef4444":"#7a8599"}}>{l}{w?" ⚠":""}</span>
-      <span style={{fontFamily:"JetBrains Mono",fontSize:9,color:"#cbd5e1"}}>{dv||v?.toFixed(4)||"—"}</span>
+  return(<div style={{marginBottom:4}}>
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:2}}>
+      <span style={{color:w?"#ef4444":"#94a3b8"}}>{l}{w?" ⚠":""}</span>
+      <span style={{fontFamily:"JetBrains Mono",fontSize:11,color:"#e2e8f0",fontWeight:500}}>{dv||v?.toFixed(4)||"—"}</span>
     </div>
-    <div style={{height:2.5,borderRadius:2,background:"rgba(255,255,255,0.04)"}}>
+    <div style={{height:3,borderRadius:2,background:"rgba(255,255,255,0.05)"}}>
       <div style={{height:"100%",borderRadius:2,background:c,width:`${Math.min(v||0,1)*100}%`,transition:"width 0.25s"}}/>
     </div>
   </div>);
 }
 function MBtn({onClick,children}){
   return<button onClick={onClick} style={{
-    padding:"3px 8px",border:"1px solid rgba(255,255,255,0.08)",borderRadius:4,
-    background:"rgba(30,41,59,0.7)",color:"#e2e8f0",cursor:"pointer",fontSize:11,fontFamily:"inherit",
+    padding:"5px 11px",border:"1px solid rgba(255,255,255,0.1)",borderRadius:5,
+    background:"rgba(30,41,59,0.8)",color:"#e2e8f0",cursor:"pointer",fontSize:13,fontFamily:"inherit",
   }}>{children}</button>;
 }
