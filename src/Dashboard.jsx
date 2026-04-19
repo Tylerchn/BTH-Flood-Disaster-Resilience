@@ -89,11 +89,6 @@ export default function Dashboard(){
   const [styleEpoch,setStyleEpoch]=useState(0);
   const [scenario,setScenario]=useState("SSP585");
   const [showAllStrategies,setShowAllStrategies]=useState(true);
-  const [showRivers,setShowRivers]=useState(false);
-  const [showShelters,setShowShelters]=useState(false);
-  const [showHospitals,setShowHospitals]=useState(false);
-  const [showRepairPath,setShowRepairPath]=useState(false);
-  const [showAELBar,setShowAELBar]=useState(true);
   const timer=useRef(null);
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
@@ -101,10 +96,7 @@ export default function Dashboard(){
   const citiesGeoRef=useRef(null);
   const countiesGeoRef=useRef(null);
   const edgesGeoRef=useRef(null);
-  const riversGeoRef=useRef(null);
-  const sheltersGeoRef=useRef(null);
-  const hospitalsGeoRef=useRef(null);
-  const togglesRef=useRef({cities:false,counties:false,edges:false,rivers:false,shelters:false,hospitals:false,repairPath:false});
+  const togglesRef=useRef({cities:false,counties:false,edges:false});
   const hovIdRef=useRef(null);
 
   // Load data
@@ -149,19 +141,6 @@ export default function Dashboard(){
     if(r.length>44)r=r.slice(0,44);
     return r;
   };
-
-  // 城市 AEL 汇总(第六章右下柱状图用)
-  const cityAEL=useMemo(()=>{
-    if(!data)return[];
-    const sums={},counts={};
-    data.units.forEach(u=>{
-      sums[u.cityName]=(sums[u.cityName]||0)+(u.aeld||0);
-      counts[u.cityName]=(counts[u.cityName]||0)+1;
-    });
-    return Object.entries(sums)
-      .map(([name,v])=>({name,aeld:v,n:counts[name]}))
-      .sort((a,b)=>b.aeld-a.aeld);
-  },[data]);
 
   // 主恢复曲线(根据选中情景)
   const primaryCurve=useMemo(()=>{
@@ -227,12 +206,8 @@ export default function Dashboard(){
 
   // ── toggles 实时同步到 ref(给 style.load 回调用,避免闭包陈旧) ──
   useEffect(()=>{
-    togglesRef.current={
-      cities:showCities,counties:showCounties,edges:showNetEdges,
-      rivers:showRivers,shelters:showShelters,hospitals:showHospitals,
-      repairPath:showRepairPath,
-    };
-  },[showCities,showCounties,showNetEdges,showRivers,showShelters,showHospitals,showRepairPath]);
+    togglesRef.current={cities:showCities,counties:showCounties,edges:showNetEdges};
+  },[showCities,showCounties,showNetEdges]);
 
   // ── Mapbox init(data 就绪时只建一次) ──
   useEffect(()=>{
@@ -262,10 +237,7 @@ export default function Dashboard(){
       pFetch("cities.geojson"),
       pFetch("counties.geojson"),
       pFetch("city_edges_g1.geojson"),
-      pFetch("rivers.geojson"),
-      pFetch("shelters.geojson"),
-      pFetch("hospitals.geojson"),
-    ]).then(([ws,cs,cn,eg,rv,sh,hp])=>{
+    ]).then(([ws,cs,cn,eg])=>{
       if(!ws){ setMapError("watersheds.geojson 加载失败"); return; }
       ws.features.forEach(f=>{
         const u=data.units.find(x=>x.wsId===f.properties.id);
@@ -275,9 +247,6 @@ export default function Dashboard(){
       citiesGeoRef.current=cs;
       countiesGeoRef.current=cn;
       edgesGeoRef.current=eg;
-      riversGeoRef.current=rv;
-      sheltersGeoRef.current=sh;
-      hospitalsGeoRef.current=hp;
       if(map.isStyleLoaded())addLayers(map);
       setMapReady(true);
     });
@@ -374,50 +343,6 @@ export default function Dashboard(){
           "line-opacity":0.75,
         }});
     }
-    // 河流水系(放在 ws-fill 之下:用 beforeId='ws-fill' 插入)
-    if(riversGeoRef.current&&!map.getSource("rivers")){
-      map.addSource("rivers",{type:"geojson",data:riversGeoRef.current});
-      map.addLayer({id:"rivers-fill",type:"fill",source:"rivers",
-        layout:{visibility:tog.rivers?"visible":"none"},
-        paint:{"fill-color":"rgba(56,189,248,0.42)","fill-outline-color":"rgba(125,211,252,0.55)"},
-      }, map.getLayer("ws-fill")?"ws-fill":undefined);
-    }
-    // 应急避难场所
-    if(sheltersGeoRef.current&&!map.getSource("shelters")){
-      map.addSource("shelters",{type:"geojson",data:sheltersGeoRef.current});
-      map.addLayer({id:"shelters-pt",type:"circle",source:"shelters",
-        layout:{visibility:tog.shelters?"visible":"none"},
-        paint:{
-          "circle-radius":["interpolate",["linear"],["zoom"],5,2,9,5,12,8],
-          "circle-color":"#22c55e",
-          "circle-opacity":0.85,
-          "circle-stroke-color":"#fff","circle-stroke-width":0.8,"circle-stroke-opacity":0.7,
-        }});
-    }
-    // 三级医院
-    if(hospitalsGeoRef.current&&!map.getSource("hospitals")){
-      map.addSource("hospitals",{type:"geojson",data:hospitalsGeoRef.current});
-      map.addLayer({id:"hospitals-pt",type:"circle",source:"hospitals",
-        layout:{visibility:tog.hospitals?"visible":"none"},
-        paint:{
-          "circle-radius":["interpolate",["linear"],["zoom"],5,2.5,9,6,12,10],
-          "circle-color":"#ef4444",
-          "circle-opacity":0.9,
-          "circle-stroke-color":"#fff","circle-stroke-width":1,"circle-stroke-opacity":0.9,
-        }});
-    }
-    // 修复路径(初始为空 FeatureCollection,由后续 useEffect 填数据)
-    if(!map.getSource("repair-path")){
-      map.addSource("repair-path",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
-      map.addLayer({id:"repair-path-line",type:"line",source:"repair-path",
-        layout:{visibility:tog.repairPath?"visible":"none","line-cap":"round","line-join":"round"},
-        paint:{
-          "line-color":"#fbbf24",
-          "line-width":2.2,
-          "line-opacity":0.85,
-          "line-dasharray":[2,1.2],
-        }});
-    }
   }
 
   // ── 底图切换 ──
@@ -458,41 +383,6 @@ export default function Dashboard(){
     if(!map||!mapReady||!map.getLayer("net-edges-line"))return;
     map.setLayoutProperty("net-edges-line","visibility",showNetEdges?"visible":"none");
   },[showNetEdges,mapReady,styleEpoch]);
-  useEffect(()=>{
-    const map=mapRef.current;
-    if(!map||!mapReady||!map.getLayer("rivers-fill"))return;
-    map.setLayoutProperty("rivers-fill","visibility",showRivers?"visible":"none");
-  },[showRivers,mapReady,styleEpoch]);
-  useEffect(()=>{
-    const map=mapRef.current;
-    if(!map||!mapReady||!map.getLayer("shelters-pt"))return;
-    map.setLayoutProperty("shelters-pt","visibility",showShelters?"visible":"none");
-  },[showShelters,mapReady,styleEpoch]);
-  useEffect(()=>{
-    const map=mapRef.current;
-    if(!map||!mapReady||!map.getLayer("hospitals-pt"))return;
-    map.setLayoutProperty("hospitals-pt","visibility",showHospitals?"visible":"none");
-  },[showHospitals,mapReady,styleEpoch]);
-  useEffect(()=>{
-    const map=mapRef.current;
-    if(!map||!mapReady||!map.getLayer("repair-path-line"))return;
-    map.setLayoutProperty("repair-path-line","visibility",showRepairPath?"visible":"none");
-  },[showRepairPath,mapReady,styleEpoch]);
-
-  // ── 修复路径数据:随 step 变化更新 LineString(连接已修复单元的质心,按 repairOrder 顺序) ──
-  useEffect(()=>{
-    const map=mapRef.current;
-    if(!map||!mapReady||!data)return;
-    const src=map.getSource("repair-path");
-    if(!src)return;
-    const sorted=[...data.units].sort((a,b)=>a.repairOrder-b.repairOrder);
-    const n=Math.max(0,Math.min(sorted.length,(step+1)*3));
-    const coords=sorted.slice(0,n).map(u=>[u.x,u.y]);
-    const feat=coords.length>=2
-      ?{type:"FeatureCollection",features:[{type:"Feature",geometry:{type:"LineString",coordinates:coords}}]}
-      :{type:"FeatureCollection",features:[]};
-    src.setData(feat);
-  },[step,data,mapReady,styleEpoch]);
 
   // ── 选中同步:sel 变化时更新 feature-state.selected ──
   useEffect(()=>{
@@ -620,15 +510,6 @@ export default function Dashboard(){
             {ch===4&&<Toggle label="城市网络边(78)" color="#ec4899" on={showNetEdges} set={setShowNetEdges}/>}
           </div>
 
-          {/* 环境 / 应急 叠加 */}
-          <div style={{marginTop:4,paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)"}}>
-            <div style={{fontSize:11,color:"#64748b",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>环境 / 应急</div>
-            <Toggle label="河流水系(4.5k)" color="#38bdf8" on={showRivers} set={setShowRivers}/>
-            <Toggle label="避难场所(635)" color="#22c55e" on={showShelters} set={setShowShelters}/>
-            <Toggle label="三级医院(228)" color="#ef4444" on={showHospitals} set={setShowHospitals}/>
-            {ch===6&&<Toggle label="修复路径" color="#fbbf24" on={showRepairPath} set={setShowRepairPath} dashed/>}
-          </div>
-
           <div style={{marginTop:"auto",paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)",fontSize:11,color:"#475569",lineHeight:1.6}}>
             {data.meta.totalUnits} 汇水单元<br/>{data.meta.totalCities} 城市 · Mapbox 底图<br/>
             <span style={{fontSize:10,color:"#334155"}}>Jenks · 5 分级</span>
@@ -694,55 +575,6 @@ export default function Dashboard(){
               </span>
               <span style={{fontSize:12,color:"#64748b"}}>{recState.repaired.size}/129</span>
             </div>
-          )}
-
-          {/* Ch6 AEL 城市汇总柱状图 */}
-          {ch===6&&showAELBar&&(
-            <div style={{
-              position:"absolute",bottom:layer6==="recovery"?56:12,left:12,
-              width:210,background:"rgba(8,12,20,0.92)",padding:"10px 11px",
-              borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",
-            }}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                <div style={{fontSize:12,color:"#fbbf24",fontWeight:600,letterSpacing:0.3}}>年期望损失 (亿元)</div>
-                <button onClick={()=>setShowAELBar(false)} style={{
-                  background:"transparent",border:"none",color:"#475569",cursor:"pointer",fontSize:14,padding:0,lineHeight:1,
-                }} title="关闭">×</button>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                {cityAEL.map(c=>{
-                  const pct=c.aeld/(cityAEL[0]?.aeld||1)*100;
-                  const hov=hov!==null?data.units.find(u=>u.id===hov)?.cityName:null;
-                  const sel=sel!==null?data.units.find(u=>u.id===sel)?.cityName:null;
-                  const active=hov===c.name||sel===c.name;
-                  return(
-                    <div key={c.name} style={{display:"flex",alignItems:"center",gap:5,fontSize:10}}>
-                      <span style={{width:36,color:active?"#fbbf24":"#94a3b8",fontWeight:active?600:400}}>{c.name}</span>
-                      <div style={{flex:1,height:7,background:"rgba(255,255,255,0.05)",borderRadius:2,overflow:"hidden"}}>
-                        <div style={{
-                          height:"100%",width:`${pct}%`,
-                          background:active?"#fbbf24":"rgba(251,191,36,0.55)",
-                          transition:"width 0.3s",borderRadius:2,
-                        }}/>
-                      </div>
-                      <span style={{width:34,textAlign:"right",fontFamily:"JetBrains Mono",
-                        color:active?"#fbbf24":"#cbd5e1",fontSize:10}}>{c.aeld.toFixed(1)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={{fontSize:9,color:"#475569",marginTop:5,textAlign:"right"}}>
-                总计 {cityAEL.reduce((s,c)=>s+c.aeld,0).toFixed(1)} 亿/年
-              </div>
-            </div>
-          )}
-          {ch===6&&!showAELBar&&(
-            <button onClick={()=>setShowAELBar(true)} style={{
-              position:"absolute",bottom:layer6==="recovery"?56:12,left:12,
-              padding:"5px 10px",background:"rgba(8,12,20,0.92)",
-              border:"1px solid rgba(251,191,36,0.3)",borderRadius:4,
-              color:"#fbbf24",fontSize:11,cursor:"pointer",fontFamily:"inherit",
-            }}>▤ AEL 排行</button>
           )}
 
           {/* Recovery curve + 情景切换 + 策略对比 */}
