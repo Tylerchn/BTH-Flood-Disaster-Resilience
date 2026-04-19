@@ -98,6 +98,7 @@ export default function Dashboard(){
   const edgesGeoRef=useRef(null);
   const togglesRef=useRef({cities:false,counties:false,edges:false});
   const hovIdRef=useRef(null);
+  const styleLoadedRef=useRef(false);
 
   // Load data
   useEffect(()=>{
@@ -227,34 +228,21 @@ export default function Dashboard(){
       });
     }catch(e){ setMapError(String(e.message||e)); return; }
     mapRef.current=map;
+    // ── 注册所有监听器,在 Promise.all 之前,避免错过初始 style.load ──
     map.on("error",(e)=>{ if(e?.error?.status===401)setMapError("Mapbox token 无效(401)"); });
 
-    // 并行拉取所有 geojson,缓存到 ref(仅做一次)
-    const base=import.meta.env.BASE_URL;
-    const pFetch=(f)=>fetch(base+f).then(r=>r.ok?r.json():Promise.reject(r.status)).catch(e=>{console.warn(f+"加载失败:",e);return null;});
-    Promise.all([
-      pFetch("watersheds.geojson"),
-      pFetch("cities.geojson"),
-      pFetch("counties.geojson"),
-      pFetch("city_edges_g1.geojson"),
-    ]).then(([ws,cs,cn,eg])=>{
-      if(!ws){ setMapError("watersheds.geojson 加载失败"); return; }
-      ws.features.forEach(f=>{
-        const u=data.units.find(x=>x.wsId===f.properties.id);
-        f.properties._color=u?"#666":"#444";
-      });
-      geoRef.current=ws;
-      citiesGeoRef.current=cs;
-      countiesGeoRef.current=cn;
-      edgesGeoRef.current=eg;
-      if(map.isStyleLoaded())addLayers(map);
-      setMapReady(true);
-    });
-
     // style.load 事件:初始 + 每次 setStyle 都会触发
-    map.on("style.load",()=>{
-      if(geoRef.current)addLayers(map);
+    // 用 ref 精确跟踪 style 加载状态(比 isStyleLoaded() 更可靠)
+    const tryAdd=()=>{
+      const m=mapRef.current;
+      if(!m||!geoRef.current||!styleLoadedRef.current)return false;
+      addLayers(m);
       setStyleEpoch(e=>e+1);
+      return true;
+    };
+    map.on("style.load",()=>{
+      styleLoadedRef.current=true;
+      tryAdd();
     });
 
     // 持久监听:直接挂在 map 上,不绑定到 layer id,存活于 setStyle
@@ -285,7 +273,30 @@ export default function Dashboard(){
       setSel(prev=>prev===idZero?null:idZero);
     });
 
-    return()=>{ map.remove(); mapRef.current=null; setMapReady(false); };
+    // 并行拉取所有 geojson,缓存到 ref(仅做一次)
+    const base=import.meta.env.BASE_URL;
+    const pFetch=(f)=>fetch(base+f).then(r=>r.ok?r.json():Promise.reject(r.status)).catch(e=>{console.warn(f+"加载失败:",e);return null;});
+    Promise.all([
+      pFetch("watersheds.geojson"),
+      pFetch("cities.geojson"),
+      pFetch("counties.geojson"),
+      pFetch("city_edges_g1.geojson"),
+    ]).then(([ws,cs,cn,eg])=>{
+      if(!ws){ setMapError("watersheds.geojson 加载失败"); return; }
+      ws.features.forEach(f=>{
+        const u=data.units.find(x=>x.wsId===f.properties.id);
+        f.properties._color=u?"#666":"#444";
+      });
+      geoRef.current=ws;
+      citiesGeoRef.current=cs;
+      countiesGeoRef.current=cn;
+      edgesGeoRef.current=eg;
+      // 如果 style 已就绪,立即加图层;否则 style.load 回调会在它到达时自动触发 tryAdd
+      tryAdd();
+      setMapReady(true);
+    });
+
+    return()=>{ map.remove(); mapRef.current=null; styleLoadedRef.current=false; setMapReady(false); };
   },[data]);
 
   // ── 内部辅助:把所有自定义 source/layer 加回当前 style(幂等) ──
