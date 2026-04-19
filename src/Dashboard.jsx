@@ -48,6 +48,8 @@ export default function Dashboard(){
   const [panelOpen,setPanelOpen]=useState(true);
   const [mapReady,setMapReady]=useState(false);
   const [mapError,setMapError]=useState(null);
+  const [showCities,setShowCities]=useState(false);
+  const [showCounties,setShowCounties]=useState(false);
   const timer=useRef(null);
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
@@ -186,6 +188,26 @@ export default function Dashboard(){
           },
         });
 
+        // 行政叠加图层(城市/区县) — 初始隐藏,由 toggle 切换
+        try{
+          const citiesGeo=await fetch(import.meta.env.BASE_URL+"cities.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
+          map.addSource("cities",{type:"geojson",data:citiesGeo});
+          map.addLayer({
+            id:"cities-line",type:"line",source:"cities",
+            layout:{visibility:"none"},
+            paint:{"line-color":"#fbbf24","line-width":1.8,"line-opacity":0.85},
+          });
+        }catch(e){ console.warn("cities.geojson 加载失败:",e); }
+        try{
+          const countiesGeo=await fetch(import.meta.env.BASE_URL+"counties.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
+          map.addSource("counties",{type:"geojson",data:countiesGeo});
+          map.addLayer({
+            id:"counties-line",type:"line",source:"counties",
+            layout:{visibility:"none"},
+            paint:{"line-color":"rgba(203,213,225,0.55)","line-width":0.6,"line-dasharray":[2,2]},
+          });
+        }catch(e){ console.warn("counties.geojson 加载失败:",e); }
+
         // 城市质心 -> 标签符号层(用 HTML overlay 以避开 Mapbox CJK 字形依赖)
         // 下面 mousemove/leave/click 均以 promoteId=id 对应的 feature.id 为主键(= wsId 1-129)
         map.on("mousemove","ws-fill",(e)=>{
@@ -235,6 +257,18 @@ export default function Dashboard(){
     });
     src.setData(geo);
   },[getColor,data,mapReady]);
+
+  // ── 行政叠加可见性同步 ──
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!mapReady||!map.getLayer("cities-line"))return;
+    map.setLayoutProperty("cities-line","visibility",showCities?"visible":"none");
+  },[showCities,mapReady]);
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!mapReady||!map.getLayer("counties-line"))return;
+    map.setLayoutProperty("counties-line","visibility",showCounties?"visible":"none");
+  },[showCounties,mapReady]);
 
   // ── 选中同步:sel 变化时更新 feature-state.selected ──
   useEffect(()=>{
@@ -348,6 +382,13 @@ export default function Dashboard(){
             {layer6==="phase"&&<Legnd items={Object.entries(PHASE_COLORS).map(([k,v])=>({c:v,l:k}))}/>}
             {(layer6==="aeld"||layer6==="damage")&&<CB s="risk" field={layer6} breaks={data.jenks}/>}
           </>}
+          {/* 行政叠加切换 */}
+          <div style={{marginTop:8,paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)"}}>
+            <div style={{fontSize:11,color:"#64748b",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>行政叠加</div>
+            <Toggle label="城市边界(13)" color="#fbbf24" on={showCities} set={setShowCities}/>
+            <Toggle label="区县边界(199)" color="#cbd5e1" on={showCounties} set={setShowCounties} dashed/>
+          </div>
+
           <div style={{marginTop:"auto",paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)",fontSize:11,color:"#475569",lineHeight:1.6}}>
             {data.meta.totalUnits} 汇水单元<br/>{data.meta.totalCities} 城市 · Mapbox 底图<br/>
             <span style={{fontSize:10,color:"#334155"}}>Jenks · 5 分级</span>
@@ -587,6 +628,26 @@ function CityLabels({map,ready,cityGroups}){
         );
       })}
     </div>
+  );
+}
+
+// 行政叠加开关
+function Toggle({label,color,on,set,dashed}){
+  return(
+    <button onClick={()=>set(!on)} style={{
+      display:"flex",alignItems:"center",gap:9,width:"100%",
+      padding:"6px 9px",border:"none",borderRadius:4,cursor:"pointer",
+      fontFamily:"inherit",fontSize:12,textAlign:"left",marginBottom:3,
+      background:on?"rgba(59,130,246,0.15)":"transparent",
+      color:on?"#e2e8f0":"#94a3b8",transition:"all 0.12s",
+    }}>
+      <span style={{
+        display:"inline-block",width:18,height:0,
+        borderTop:on?`${dashed?"1.5px dashed":"2px solid"} ${color}`:"1.5px solid rgba(255,255,255,0.15)",
+        boxShadow:on?`0 0 4px ${color}`:"none",
+      }}/>
+      {label}
+    </button>
   );
 }
 
