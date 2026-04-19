@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """将城市边界与区县边界 shapefile 转成简化的 WGS84 GeoJSON"""
-import geopandas as gpd, os, sys, warnings
+import geopandas as gpd, pandas as pd, os, sys, json, warnings
 warnings.filterwarnings('ignore')
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -60,6 +60,22 @@ convert(
     rename={"地名": "name", "地级": "city", "省级": "province"},
     simp_tol=0.003,  # 区县尺度较小,保留更多细节
 )
+
+# 区县标签 (Point 质心,用于前端 HTML 叠加)
+print("\n[counties_labels.geojson] 计算质心...")
+cgdf = gpd.read_file(r"E:\大论文数据处理\data\京津冀_行政区边界.shp")
+# UTM 下算质心,再转回 WGS84
+centroid_utm = cgdf.to_crs(32650).geometry.centroid
+centroid_wgs = gpd.GeoSeries(centroid_utm, crs=32650).to_crs(4326)
+pts = gpd.GeoDataFrame({
+    "name": cgdf["地名"].values,
+    "city": cgdf["地级"].values,
+    "geometry": centroid_wgs,
+}, crs=4326)
+out_pts = os.path.join(OUT_DIR, "counties_labels.geojson")
+if os.path.exists(out_pts): os.remove(out_pts)
+pts.to_file(out_pts, driver="GeoJSON")
+print(f"  ✅ {out_pts}  {os.path.getsize(out_pts)/1024:.1f} KB, {len(pts)} 个点")
 
 # 末端检查
 for f in ["cities.geojson", "counties.geojson"]:

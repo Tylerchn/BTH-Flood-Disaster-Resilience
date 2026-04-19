@@ -50,6 +50,8 @@ export default function Dashboard(){
   const [mapError,setMapError]=useState(null);
   const [showCities,setShowCities]=useState(false);
   const [showCounties,setShowCounties]=useState(false);
+  const [showCountyLabels,setShowCountyLabels]=useState(false);
+  const [showNetEdges,setShowNetEdges]=useState(false);
   const timer=useRef(null);
   const mapContainer=useRef(null);
   const mapRef=useRef(null);
@@ -204,9 +206,33 @@ export default function Dashboard(){
           map.addLayer({
             id:"counties-line",type:"line",source:"counties",
             layout:{visibility:"none"},
-            paint:{"line-color":"rgba(203,213,225,0.55)","line-width":0.6,"line-dasharray":[2,2]},
+            paint:{"line-color":"rgba(56,189,248,0.75)","line-width":0.9,"line-dasharray":[2,2]}, // 青色,明显区别于汇水白边
           });
         }catch(e){ console.warn("counties.geojson 加载失败:",e); }
+
+        // 城市间网络边(第四章网络联系韧性)
+        try{
+          const edgesGeo=await fetch(import.meta.env.BASE_URL+"city_edges_g1.geojson").then(r=>r.ok?r.json():Promise.reject(r.status));
+          map.addSource("net-edges",{type:"geojson",data:edgesGeo});
+          // 主线:按 W_sym(w) 线性映射到 0.6-4px
+          map.addLayer({
+            id:"net-edges-line",type:"line",source:"net-edges",
+            layout:{visibility:"none","line-cap":"round"},
+            paint:{
+              "line-color":[
+                "match",["get","cls"],
+                1,"#64748b",
+                2,"#3b82f6",
+                3,"#8b5cf6",
+                4,"#ec4899",
+                5,"#ef4444",
+                "#94a3b8",
+              ],
+              "line-width":["interpolate",["linear"],["get","w"],0,0.6,1,4.0],
+              "line-opacity":0.75,
+            },
+          });
+        }catch(e){ console.warn("city_edges_g1.geojson 加载失败:",e); }
 
         // 城市质心 -> 标签符号层(用 HTML overlay 以避开 Mapbox CJK 字形依赖)
         // 下面 mousemove/leave/click 均以 promoteId=id 对应的 feature.id 为主键(= wsId 1-129)
@@ -269,6 +295,11 @@ export default function Dashboard(){
     if(!map||!mapReady||!map.getLayer("counties-line"))return;
     map.setLayoutProperty("counties-line","visibility",showCounties?"visible":"none");
   },[showCounties,mapReady]);
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!mapReady||!map.getLayer("net-edges-line"))return;
+    map.setLayoutProperty("net-edges-line","visibility",showNetEdges?"visible":"none");
+  },[showNetEdges,mapReady]);
 
   // ── 选中同步:sel 变化时更新 feature-state.selected ──
   useEffect(()=>{
@@ -358,8 +389,9 @@ export default function Dashboard(){
           <div style={{fontSize:11,color:"#64748b",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase"}}>图层</div>
           {ch===4&&<>
             <LG label="韧性" opts={[
-              {k:"nfr",l:"综合NFR"},{k:"econR",l:"经济"},{k:"socR",l:"社会"},
-              {k:"infraR",l:"基础设施"},{k:"ecoR",l:"生态"},{k:"weakest",l:"最弱子系统"},
+              {k:"baseline",l:"综合韧性基线"},{k:"nfr",l:"节点功能韧性"},{k:"nri",l:"网络联系韧性"},
+              {k:"econR",l:"经济"},{k:"socR",l:"社会"},{k:"infraR",l:"基础设施"},{k:"ecoR",l:"生态"},
+              {k:"weakest",l:"最弱子系统"},
             ]} v={layer4} set={setLayer4}/>
             {layer4!=="weakest"?<CB s="res" field={layer4} breaks={data.jenks}/>:
               <Legnd items={SUB_NAMES.map((n,i)=>({c:SUB_COLORS[i],l:n}))}/>}
@@ -386,7 +418,9 @@ export default function Dashboard(){
           <div style={{marginTop:8,paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)"}}>
             <div style={{fontSize:11,color:"#64748b",fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>行政叠加</div>
             <Toggle label="城市边界(13)" color="#fbbf24" on={showCities} set={setShowCities}/>
-            <Toggle label="区县边界(199)" color="#cbd5e1" on={showCounties} set={setShowCounties} dashed/>
+            <Toggle label="区县边界(199)" color="#38bdf8" on={showCounties} set={setShowCounties} dashed/>
+            <Toggle label="区县名称(199)" color="#38bdf8" on={showCountyLabels} set={setShowCountyLabels}/>
+            {ch===4&&<Toggle label="城市网络边(78)" color="#ec4899" on={showNetEdges} set={setShowNetEdges}/>}
           </div>
 
           <div style={{marginTop:"auto",paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.04)",fontSize:11,color:"#475569",lineHeight:1.6}}>
@@ -411,6 +445,9 @@ export default function Dashboard(){
 
           {/* 城市名 HTML 叠加(Mapbox 原生文字缺 CJK 字形,改用 DOM 覆盖) */}
           <CityLabels map={mapRef.current} ready={mapReady} cityGroups={cityGroups}/>
+
+          {/* 区县名称 HTML 叠加 — 仅当 showCountyLabels 为 true 时绘制,且 zoom>=7 避免远景密密麻麻 */}
+          <CountyLabels map={mapRef.current} ready={mapReady} show={showCountyLabels}/>
 
           {/* Chapter overlay */}
           <div style={{position:"absolute",top:12,left:14,fontSize:15,fontWeight:600,color:"rgba(148,163,184,0.72)",pointerEvents:"none",letterSpacing:0.5}}>
@@ -445,7 +482,7 @@ export default function Dashboard(){
               width:280,height:150,background:"rgba(8,12,20,0.92)",padding:"10px 12px",
               borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",
             }}>
-              <div style={{fontSize:11,color:"#64748b",marginBottom:4,fontWeight:600,letterSpacing:0.5}}>F(t) · {data.meta.recoveryScenario}</div>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:4,fontWeight:600,letterSpacing:0.5}}>恢复曲线</div>
               <svg viewBox="0 0 220 100" style={{width:"100%",height:95}}>
                 {[0.5,0.6,0.7,0.8].map(v=>(
                   <g key={v}>
@@ -625,6 +662,48 @@ function CityLabels({map,ready,cityGroups}){
             textShadow:"0 0 6px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.9)",
             fontFamily:"'Noto Sans SC',sans-serif",whiteSpace:"nowrap",
           }}>{name}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+// 区县名称 HTML 叠加,独立加载 counties_labels.geojson(199 个质心点),缩放低时隐藏避免拥挤
+function CountyLabels({map,ready,show}){
+  const [pts,setPts]=useState(null);
+  const [, force]=useState(0);
+  useEffect(()=>{
+    if(!show||pts)return;
+    fetch(import.meta.env.BASE_URL+"counties_labels.geojson").then(r=>r.json())
+      .then(g=>setPts(g.features.map(f=>({
+        name:f.properties.name,
+        city:f.properties.city,
+        lng:f.geometry.coordinates[0],
+        lat:f.geometry.coordinates[1],
+      }))))
+      .catch(e=>console.warn("counties_labels 加载失败:",e));
+  },[show,pts]);
+  useEffect(()=>{
+    if(!map||!ready)return;
+    const upd=()=>force(v=>v+1);
+    map.on("move",upd); map.on("zoom",upd); upd();
+    return()=>{ map.off("move",upd); map.off("zoom",upd); };
+  },[map,ready]);
+  if(!map||!ready||!show||!pts)return null;
+  const zoom=map.getZoom();
+  if(zoom<7)return null; // 低缩放不画,避免 199 个标签叠一团
+  const opacity=Math.min(1,(zoom-7)/1.5); // zoom 7→0, 8.5+→全显
+  return(
+    <div style={{position:"absolute",inset:0,pointerEvents:"none",zIndex:2}}>
+      {pts.map((p,i)=>{
+        const pt=map.project([p.lng,p.lat]);
+        return(
+          <div key={i} style={{
+            position:"absolute",left:pt.x,top:pt.y,transform:"translate(-50%,-50%)",
+            fontSize:10,fontWeight:500,color:`rgba(186,230,253,${opacity*0.85})`,
+            textShadow:"0 0 4px rgba(0,0,0,0.9),0 0 2px rgba(0,0,0,0.9)",
+            fontFamily:"'Noto Sans SC',sans-serif",whiteSpace:"nowrap",letterSpacing:0.3,
+          }}>{p.name}</div>
         );
       })}
     </div>

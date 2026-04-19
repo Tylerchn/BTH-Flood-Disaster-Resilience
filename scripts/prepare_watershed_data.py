@@ -57,7 +57,7 @@ print("[4/11] 合并主表...")
 df = gdf[["watershed_id", "main_city", "x", "y", "xUtm", "yUtm"]].copy()
 
 res_cols_want = ["watershed_id","ECON_T_ws_norm","SOC_T_ws_norm","INFRA_T_ws_norm","ECO_T_ws_norm",
-                 "NFR_norm","NRI_norm","H_score","E_score","S_score","A_score",
+                 "NFR_norm","NRI_norm","Baseline_norm","H_score","E_score","S_score","A_score",
                  "risk_B","quadrant","coupling_coord_D","dominant_shortboard"]
 res_cols = [c for c in res_cols_want if c in res.columns]
 missing = [c for c in res_cols_want if c not in res.columns]
@@ -135,6 +135,7 @@ for _, r in df.iterrows():
         "ecoR":   safe_float(r.get("ECO_T_ws_norm")),
         "nfr":    safe_float(r.get("NFR_norm")),
         "nri":    safe_float(r.get("NRI_norm")),
+        "baseline": safe_float(r.get("Baseline_norm")),
         "hazard":       safe_float(r.get("H_score")),
         "exposure":     safe_float(r.get("E_score")),
         "sensitivity":  safe_float(r.get("S_score")),
@@ -190,7 +191,7 @@ except Exception as e:
 # ─── 9b) Jenks 5 分级断点(每个连续字段) ───
 print("[9a] 计算 Jenks 5 分级...")
 JENKS_FIELDS = [
-    "econR","socR","infraR","ecoR","nfr","nri",
+    "econR","socR","infraR","ecoR","nfr","nri","baseline",
     "hazard","exposure","sensitivity","adaptability","riskScore","couplingDegree",
     "aeld","damage","hubWeight","inundDepth","roadDamageRate",
 ]
