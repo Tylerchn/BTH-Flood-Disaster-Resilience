@@ -353,7 +353,7 @@ export default function Dashboard(){
       <div style={{width:40,height:40,border:"3px solid #1e293b",borderTopColor:"#3b82f6",borderRadius:"50%",
         animation:"spin 0.8s linear infinite"}}/>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}`}</style>
-      <div style={{fontSize:14,animation:"pulse 1.5s ease infinite"}}>加载京津冀洪涝韧性数据…</div>
+      <div style={{fontSize:14,animation:"pulse 1.5s ease infinite"}}>加载京津冀城市群洪涝韧性监测平台数据…</div>
     </div>
   );
   if(error)return(
@@ -385,7 +385,7 @@ export default function Dashboard(){
       }}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginRight:8}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 8px #22c55e"}}/>
-          <span style={{fontSize:16,fontWeight:700,letterSpacing:0.5,whiteSpace:"nowrap"}}>京津冀洪涝韧性仪表盘</span>
+          <span style={{fontSize:16,fontWeight:700,letterSpacing:0.5,whiteSpace:"nowrap"}}>京津冀城市群洪涝韧性监测平台</span>
         </div>
         <div style={{display:"flex",gap:3}}>
           {[{c:4,l:"灾前韧性"},{c:5,l:"风险耦合"},{c:6,l:"恢复优化"}].map(({c,l})=>(
