@@ -12,9 +12,7 @@ Beijing-Tianjin-Hebei Urban Agglomeration Flood Disaster Resilience Dashboard
 
 ## Tech Stack
 
-- React 18 + Vite
-- 纯 SVG 可视化（无外部地图库依赖）
-- GitHub Pages 自动部署
+
 
 ## Quick Start
 
@@ -25,4 +23,5 @@ npm run dev
 
 ## License
 
+学术成果专用。部分论文研究成果展示。
 Academic use only. Part of doctoral dissertation research.
