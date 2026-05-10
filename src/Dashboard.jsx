@@ -388,7 +388,7 @@ export default function Dashboard(){
           <span style={{fontSize:16,fontWeight:700,letterSpacing:0.5,whiteSpace:"nowrap"}}>京津冀城市群洪涝韧性监测平台</span>
         </div>
         <div style={{display:"flex",gap:3}}>
-          {[{c:4,l:"灾前韧性"},{c:5,l:"风险耦合"},{c:6,l:"恢复优化"}].map(({c,l})=>(
+          {[{c:4,l:"韧性能力测度"},{c:5,l:"风险评估诊断"},{c:6,l:"韧性协同优化"}].map(({c,l})=>(
             <button key={c} onClick={()=>{setCh(c);setStep(0);setPlaying(false);}} style={{
               padding:"6px 14px",border:"none",cursor:"pointer",borderRadius:5,fontSize:13,fontWeight:500,
               fontFamily:"inherit",transition:"all 0.15s",
@@ -489,7 +489,7 @@ export default function Dashboard(){
 
           {/* Chapter overlay */}
           <div style={{position:"absolute",top:12,left:14,fontSize:15,fontWeight:600,color:"rgba(148,163,184,0.72)",pointerEvents:"none",letterSpacing:0.5}}>
-            {ch===4&&"第四章 · 灾前韧性基线"}{ch===5&&"第五章 · 洪涝风险时空格局"}{ch===6&&"第六章 · 灾后协同恢复优化"}
+            {ch===4&&"第四章 · 韧性能力测度"}{ch===5&&"第五章 · 风险评估诊断"}{ch===6&&"第六章 · 韧性协同优化"}
           </div>
 
           {/* 底图切换 */}
