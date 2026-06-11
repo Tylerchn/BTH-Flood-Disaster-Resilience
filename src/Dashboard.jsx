@@ -395,7 +395,7 @@ export default function Dashboard(){
               background:ch===c?"rgba(59,130,246,0.2)":"transparent",
               color:ch===c?"#93c5fd":"#94a3b8",
               outline:ch===c?"1px solid rgba(59,130,246,0.3)":"1px solid transparent",
-            }}>Ch{c} {l}</button>
+            }}>{l}</button>
           ))}
         </div>
         <div style={{display:"flex",gap:4,alignItems:"center",marginLeft:"auto"}}>
@@ -489,7 +489,7 @@ export default function Dashboard(){
 
           {/* Chapter overlay */}
           <div style={{position:"absolute",top:12,left:14,fontSize:15,fontWeight:600,color:"rgba(148,163,184,0.72)",pointerEvents:"none",letterSpacing:0.5}}>
-            {ch===4&&"第四章 · 韧性能力测度"}{ch===5&&"第五章 · 风险评估诊断"}{ch===6&&"第六章 · 韧性协同优化"}
+            {ch===4&&"韧性能力测度"}{ch===5&&"风险评估诊断"}{ch===6&&"韧性协同优化"}
           </div>
 
           {/* 底图切换 */}
@@ -607,12 +607,12 @@ export default function Dashboard(){
                   <div style={{fontSize:15,fontWeight:700,color:"#e2e8f0"}}>{disp.cityName} · WS-{String(disp.wsId).padStart(3,"0")}</div>
                   <div style={{fontSize:11,color:"#64748b",marginTop:2}}>{disp.x.toFixed(2)}°E, {disp.y.toFixed(2)}°N</div>
                 </div>
-                <Sec t="第四章 · 韧性基线" c="#3b82f6">
+                <Sec t="韧性基线" c="#3b82f6">
                   <Bar l="综合NFR" v={disp.nfr} c="#3b82f6"/>
                   <Bar l="网络NRI" v={disp.nri} c="#6366f1"/>
                   {SUB_NAMES.map((n,i)=>(<Bar key={i} l={n} v={disp[SUB_KEYS[i]]} c={SUB_COLORS[i]} w={disp.weakest===i}/>))}
                 </Sec>
-                <Sec t="第五章 · 洪涝风险" c="#ef4444">
+                <Sec t="洪涝风险" c="#ef4444">
                   <Bar l="综合风险" v={disp.riskScore} c="#ef4444"/>
                   <Bar l="H 危险性" v={disp.hazard} c="#dc2626"/>
                   <Bar l="E 暴露性" v={disp.exposure} c="#f97316"/>
@@ -625,7 +625,7 @@ export default function Dashboard(){
                     <span style={{fontSize:10,color:"#475569",marginLeft:"auto"}}>CCD={disp.couplingDegree?.toFixed(3)}</span>
                   </div>
                 </Sec>
-                <Sec t="第六章 · 恢复优化" c="#22c55e">
+                <Sec t="恢复优化" c="#22c55e">
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
                     <span style={{color:"#94a3b8"}}>修复序号</span>
                     <span style={{fontFamily:"JetBrains Mono",color:"#e2e8f0",fontWeight:600}}>#{disp.repairOrder+1}/129</span>
